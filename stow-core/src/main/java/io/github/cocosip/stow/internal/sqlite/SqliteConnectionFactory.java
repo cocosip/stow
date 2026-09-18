@@ -5,6 +5,7 @@ import io.github.cocosip.stow.config.SqliteJournalMode;
 import io.github.cocosip.stow.config.SqliteSynchronousMode;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -65,16 +66,8 @@ public final class SqliteConnectionFactory {
     }
 
     public Connection open(String tenantId) throws SQLException {
-        Path databasePath = databasePath(tenantId);
-        try {
-            Path parent = databasePath.getParent();
-            if (parent == null) {
-                throw new SQLException("Tenant database path must have a parent directory");
-            }
-            Files.createDirectories(parent);
-        } catch (IOException exception) {
-            throw new SQLException("Unable to create tenant database directory", exception);
-        }
+        validateIdentifier(tenantId);
+        Path databasePath = resolveTenantDirectory(tenantId).resolve(databaseFileName);
 
         Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
         try {
@@ -87,6 +80,32 @@ public final class SqliteConnectionFactory {
                 exception.addSuppressed(closeFailure);
             }
             throw exception;
+        }
+    }
+
+    private Path resolveTenantDirectory(String tenantId) throws SQLException {
+        Path tenantDirectory = rootDirectory.resolve(tenantId).normalize();
+        if (!tenantDirectory.startsWith(rootDirectory)) {
+            throw new SQLException("Tenant database path escapes its configured root");
+        }
+        try {
+            Files.createDirectories(rootDirectory);
+            Path realRoot = rootDirectory.toRealPath();
+            if (Files.exists(tenantDirectory, LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isDirectory(tenantDirectory, LinkOption.NOFOLLOW_LINKS)
+                        || Files.isSymbolicLink(tenantDirectory)) {
+                    throw new SQLException("Tenant database directory must not be a symbolic link or reparse point");
+                }
+            } else {
+                Files.createDirectory(tenantDirectory);
+            }
+            Path realTenantDirectory = tenantDirectory.toRealPath();
+            if (!realTenantDirectory.startsWith(realRoot)) {
+                throw new SQLException("Tenant database directory escapes its configured root");
+            }
+            return realTenantDirectory;
+        } catch (IOException exception) {
+            throw new SQLException("Unable to create or validate tenant database directory", exception);
         }
     }
 

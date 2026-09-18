@@ -15,6 +15,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -56,6 +57,21 @@ class SqliteConnectionFactoryTest {
         assertThatThrownBy(() -> new SqliteConnectionFactory(root, "../outside.db", SqliteConnectionFactory.defaults()))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(temporaryDirectory.resolve("escape")).doesNotExist();
+    }
+
+    @Test
+    void rejectsTenantDirectoryLinkThatEscapesTheMetadataRoot() throws IOException {
+        Path root = temporaryDirectory.resolve("metadata");
+        Path outside = temporaryDirectory.resolve("outside");
+        Files.createDirectories(root);
+        Files.createDirectories(outside);
+        createSymbolicLinkOrSkip(root.resolve("tenant-a"), outside);
+        SqliteConnectionFactory factory =
+                new SqliteConnectionFactory(root, "metadata.db", SqliteConnectionFactory.defaults());
+
+        assertThatThrownBy(() -> factory.open("tenant-a")).isInstanceOf(SQLException.class);
+
+        assertThat(outside.resolve("metadata.db")).doesNotExist();
     }
 
     @Test
@@ -110,6 +126,15 @@ class SqliteConnectionFactoryTest {
     }
 
     @Test
+    void rejectsZeroProgressChannelWrites() {
+        ZeroProgressChannel channel = new ZeroProgressChannel();
+
+        assertThatThrownBy(() -> AtomicJsonFile.writeFully(channel, ByteBuffer.wrap(new byte[] {1})))
+                .isInstanceOf(IOException.class);
+        assertThat(channel.writeAttempts()).isEqualTo(1);
+    }
+
+    @Test
     void preservesOldJsonWhenFailureOccursAfterForceBeforeMove() throws IOException {
         Path target = temporaryDirectory.resolve("atomic").resolve("document.json");
         ObjectMapper mapper = new ObjectMapper();
@@ -147,6 +172,14 @@ class SqliteConnectionFactoryTest {
         }
     }
 
+    private static void createSymbolicLinkOrSkip(Path link, Path target) throws IOException {
+        try {
+            Files.createSymbolicLink(link, target.toAbsolutePath());
+        } catch (UnsupportedOperationException | IOException exception) {
+            Assumptions.abort("Symbolic links are unavailable in this environment: " + exception.getMessage());
+        }
+    }
+
     private record TestDocument(String value) {}
 
     private static final class PartialWriteChannel implements WritableByteChannel {
@@ -173,6 +206,32 @@ class SqliteConnectionFactoryTest {
 
         byte[] bytes() {
             return output.toByteArray();
+        }
+    }
+
+    private static final class ZeroProgressChannel implements WritableByteChannel {
+
+        private int writeAttempts;
+
+        @Override
+        public int write(ByteBuffer source) {
+            writeAttempts++;
+            if (writeAttempts == 1) {
+                return 0;
+            }
+            throw new AssertionError("writeFully retried after a zero-progress write");
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public void close() {}
+
+        int writeAttempts() {
+            return writeAttempts;
         }
     }
 }

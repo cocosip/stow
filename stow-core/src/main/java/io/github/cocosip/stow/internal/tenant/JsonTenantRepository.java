@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.cocosip.stow.exception.DatabaseRecoveryException;
+import io.github.cocosip.stow.exception.StowInterruptedException;
 import io.github.cocosip.stow.internal.sqlite.AtomicJsonFile;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -27,10 +28,15 @@ public final class JsonTenantRepository {
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         documentFile = new AtomicJsonFile<>(documentPath, mapper, TenantDocument.class);
         lock = LOCKS.computeIfAbsent(documentPath, ignored -> new ReentrantLock());
+        try {
+            documentFile.deleteStaleTemporaryFiles();
+        } catch (IOException exception) {
+            throw new DatabaseRecoveryException("Unable to remove stale tenants.json temporary files", exception);
+        }
     }
 
     public TenantDocument read() {
-        lock.lock();
+        acquireLockInterruptibly();
         try {
             return readUnlocked();
         } finally {
@@ -39,7 +45,7 @@ public final class JsonTenantRepository {
     }
 
     TenantDocument update(UnaryOperator<TenantDocument> mutation) {
-        lock.lock();
+        acquireLockInterruptibly();
         try {
             TenantDocument current = readUnlocked();
             TenantDocument updated = mutation.apply(current);
@@ -59,6 +65,14 @@ public final class JsonTenantRepository {
             return documentFile.read().orElseGet(TenantDocument::empty);
         } catch (IOException exception) {
             throw new DatabaseRecoveryException("Unable to read tenants.json", exception);
+        }
+    }
+
+    private void acquireLockInterruptibly() {
+        try {
+            lock.lockInterruptibly();
+        } catch (InterruptedException exception) {
+            throw new StowInterruptedException("Interrupted while waiting for the tenant repository lock", exception);
         }
     }
 }

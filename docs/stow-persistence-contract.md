@@ -36,6 +36,33 @@ Stow 不要求与 Locus 的磁盘格式互通。Stow 自己的 1.x 格式必须�
 
 所有 JSON 状态文件使用 UTF-8、LF、ISO-8601 UTC 时间和 camelCase 字段。持久化更新统一使用同目录临时文件、文件刷盘、原子替换；支持的平台上同时刷盘父目录。临时文件名为 `.{name}.{uuid}.tmp`，启动时安全删除未被引用的残留临时文件。
 
+### 2.1 tenants.json V1
+
+`{metadataDirectory}/tenants.json` 是租户生命周期的唯一持久化文档。V1 的根对象严格使用下列 camelCase 字段：
+
+```json
+{
+  "schemaVersion": 1,
+  "tenants": [
+    {
+      "tenantId": "tenant-a",
+      "status": "ENABLED",
+      "createdAt": "2026-09-18T00:00:00Z",
+      "updatedAt": "2026-09-18T00:00:00Z",
+      "maxFiles": 0
+    }
+  ]
+}
+```
+
+- `schemaVersion` 是整数，V1 必须为 `1`；未知版本或未知字段都视为前向不兼容，拒绝读取和写入，保留原文件以供显式迁移。
+- `tenants` 是数组；每个 `tenantId` 必须唯一，并按 `tenantId` 的升序持久化。
+- `tenantId` 是第 3 节定义的受限标识符。`status` 是字符串枚举，只能是 `ENABLED` 或 `DISABLED`。
+- `createdAt` 与 `updatedAt` 是 ISO-8601 UTC instant 字符串，且 `updatedAt` 不早于 `createdAt`。
+- `maxFiles` 是非负整数；`0` 表示无限制。创建时复制当时的默认配额，后续修改默认配额不得改写已有条目。
+
+每次更新均通过同目录的 `.{name}.{uuid}.tmp` 文件完成。`JsonTenantRepository` 构造即视为租户状态启动：它在读取文档前删除仅与 `tenants.json` 名称和 UUID 格式精确匹配的常规临时文件；不匹配的文件、目录和链接保持不变。临时写入在 force 后、原子替换前失败时，已提交的 `tenants.json` 必须仍可读取。
+
 ## 3. 标识与路径
 
 - `fileKey`：32 个小写十六进制字符，由 128 位安全随机值生成。
