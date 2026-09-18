@@ -35,3 +35,15 @@ Thumbs.db
 .cache/
 docs/superpowers/
 .superpowers/
+
+# Maven and Java IDE output
+target/
+.classpath
+.project
+.settings/
+*.iml
+
+# Generated benchmark results
+benchmarks/results/
+benchmarks/*.json
+benchmarks/*.csv
