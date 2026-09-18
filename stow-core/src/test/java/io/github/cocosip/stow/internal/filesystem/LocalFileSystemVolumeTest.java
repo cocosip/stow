@@ -9,8 +9,11 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
@@ -86,6 +89,48 @@ class LocalFileSystemVolumeTest {
     }
 
     @Test
+    void removesOnlyStorageTemporaryFilesWhenTheVolumeStarts() throws IOException {
+        Path mount = temporaryDirectory.resolve("volume");
+        Path storageDirectory = mount.resolve("tenant-a").resolve("01");
+        Files.createDirectories(storageDirectory);
+        Path staleTemporary =
+                storageDirectory.resolve("." + FILE_KEY + ".txt.85b55a44-c254-4d86-b09f-69777d73f69e.tmp");
+        Path matchingDirectory =
+                storageDirectory.resolve("." + FILE_KEY + ".txt.98cc779b-d122-4e8d-a793-b313badcb083.tmp");
+        Path unrelated = storageDirectory.resolve(".keep.tmp");
+        Files.writeString(staleTemporary, "partial");
+        Files.createDirectory(matchingDirectory);
+        Files.writeString(unrelated, "keep");
+
+        volume(mount, 1);
+
+        assertThat(staleTemporary).doesNotExist();
+        assertThat(matchingDirectory).isDirectory();
+        assertThat(unrelated).exists();
+    }
+
+    @Test
+    void pinsTheValidatedParentDirectoryWhilePublishingAWrite() throws IOException {
+        Path mount = temporaryDirectory.resolve("volume");
+        Path outside = temporaryDirectory.resolve("outside");
+        Path probeLink = temporaryDirectory.resolve("probe-link");
+        Files.createDirectory(outside);
+        createSymbolicLinkOrSkip(probeLink, outside);
+        Files.delete(probeLink);
+
+        LocalFileSystemVolume volume = volume(mount, 0);
+        Path target = volume.buildPath("tenant-a", FILE_KEY, ".txt");
+        Path displacedParent = temporaryDirectory.resolve("displaced-tenant");
+        ReplacingParentInputStream content = new ReplacingParentInputStream(
+                target, displacedParent, outside, "content".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(volume.write(target, content)).isEqualTo(7);
+
+        assertThat(displacedParent.resolve(target.getFileName())).hasContent("content");
+        assertThat(outside.resolve(target.getFileName())).doesNotExist();
+    }
+
+    @Test
     void cachesSuccessfulHealthAndCapacityProbe() throws IOException {
         Path mount = temporaryDirectory.resolve("volume");
         LocalFileSystemVolume volume = volume(mount, 0);
@@ -125,14 +170,22 @@ class LocalFileSystemVolumeTest {
         Path outside = temporaryDirectory.resolve("outside");
         Files.createDirectory(outside);
         Path tenant = volume.mountPath().resolve("tenant-a");
-        try {
-            Files.createSymbolicLink(tenant, outside);
-        } catch (UnsupportedOperationException | IOException exception) {
-            Assumptions.abort("Symbolic links are unavailable: " + exception.getMessage());
-        }
+        createSymbolicLinkOrSkip(tenant, outside);
 
         assertThatThrownBy(() -> volume.buildPath("tenant-a", FILE_KEY, ".txt"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsMountPathWithASymbolicLinkAncestor() throws IOException {
+        Path outside = temporaryDirectory.resolve("outside");
+        Path linkedRoot = temporaryDirectory.resolve("linked-root");
+        Files.createDirectory(outside);
+        createSymbolicLinkOrSkip(linkedRoot, outside);
+
+        assertThatThrownBy(() -> volume(linkedRoot.resolve("volume"), 0))
+                .isInstanceOf(StorageVolumeUnavailableException.class);
+        assertThat(outside.resolve("volume")).doesNotExist();
     }
 
     @Test
@@ -148,6 +201,41 @@ class LocalFileSystemVolumeTest {
 
     private LocalFileSystemVolume volume(Path mount, int depth) {
         return new LocalFileSystemVolume(new VolumeConfiguration("volume-1", mount, depth, 1_024, true));
+    }
+
+    private static void createSymbolicLinkOrSkip(Path link, Path target) throws IOException {
+        try {
+            Files.createSymbolicLink(link, target.toAbsolutePath());
+        } catch (UnsupportedOperationException exception) {
+            Assumptions.abort("Symbolic links are unsupported: " + exception.getMessage());
+        } catch (AccessDeniedException exception) {
+            if (isWindows()) {
+                Assumptions.abort("Symbolic link creation is not permitted: " + exception.getMessage());
+            }
+            throw exception;
+        } catch (FileSystemException exception) {
+            if (isWindows() && isMissingWindowsSymbolicLinkPrivilege(exception)) {
+                Assumptions.abort("Symbolic link creation is not permitted: " + exception.getMessage());
+            }
+            throw exception;
+        }
+        BasicFileAttributes attributes =
+                Files.readAttributes(link, BasicFileAttributes.class, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        if (!attributes.isSymbolicLink()) {
+            throw new IOException("Symbolic link creation did not create a symbolic link");
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name").startsWith("Windows");
+    }
+
+    private static boolean isMissingWindowsSymbolicLinkPrivilege(FileSystemException exception) {
+        String reason = exception.getReason();
+        return reason != null
+                && (reason.contains("privilege")
+                        || reason.contains("\u7279\u6743")
+                        || reason.contains("A required privilege is not held"));
     }
 
     private static final class BlockingInputStream extends InputStream {
@@ -191,6 +279,45 @@ class LocalFileSystemVolumeTest {
         @Override
         public int read() throws IOException {
             throw new IOException("input failed");
+        }
+    }
+
+    private static final class ReplacingParentInputStream extends InputStream {
+
+        private final Path target;
+        private final Path displacedParent;
+        private final Path outside;
+        private final byte[] content;
+        private boolean returned;
+
+        private ReplacingParentInputStream(Path target, Path displacedParent, Path outside, byte[] content) {
+            this.target = target;
+            this.displacedParent = displacedParent;
+            this.outside = outside;
+            this.content = content;
+        }
+
+        @Override
+        public int read(byte[] destination, int offset, int length) throws IOException {
+            if (returned) {
+                return -1;
+            }
+            Path parent = target.getParent();
+            Files.move(parent, displacedParent);
+            Files.createSymbolicLink(parent, outside);
+            Path temporaryName;
+            try (var files = Files.list(displacedParent)) {
+                temporaryName = files.findFirst().orElseThrow().getFileName();
+            }
+            Files.writeString(outside.resolve(temporaryName), "attacker");
+            System.arraycopy(content, 0, destination, offset, content.length);
+            returned = true;
+            return content.length;
+        }
+
+        @Override
+        public int read() {
+            throw new UnsupportedOperationException();
         }
     }
 }
