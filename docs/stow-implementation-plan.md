@@ -162,18 +162,20 @@ benchmarks/**
 
 ### Task 7: Journal codecs and format detection
 
+**Status (2026-09-18):** Complete. Binary V1 and JsonLines V1 codecs, canonical JSON/CRC validation, format detection, and golden fixtures committed in `8e2f120`; focused and `stow-core` tests pass.
+
 **Files:**
 - Create: `internal/journal/BinaryV1JournalCodec.java`, `JsonLinesJournalCodec.java`, `JournalFrame.java`, `JournalFormatDetector.java`, `QueueEventJson.java`
 - Test: `internal/journal/BinaryV1JournalCodecTest.java`, `JsonLinesJournalCodecTest.java`, `JournalFormatDetectorTest.java`
 
 **Interfaces:** Implements `JournalCodec`; produces exact Binary V1 and JsonLines V1 bytes from the persistence contract.
 
-- [ ] Add golden-byte tests for magic, big-endian lengths, sequence and CRC32; store fixtures under `stow-core/src/test/resources/journal/v1/`.
-- [ ] Add round-trip tests for all eight event types, null optional fields, Unicode error summaries, payload limit and unknown schema.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement deterministic Jackson serialization and strict frame validation without accepting trailing bytes.
-- [ ] Run focused tests and verify golden fixtures are stable across two clean builds.
-- [ ] Commit: `✨ feat(journal): define versioned queue codecs`
+- [x] Add golden-byte tests for magic, big-endian lengths, sequence and CRC32; store fixtures under `stow-core/src/test/resources/journal/v1/`.
+- [x] Add round-trip tests for all eight event types, null optional fields, Unicode error summaries, payload limit and unknown schema.
+- [x] Run focused tests; expect failure.
+- [x] Implement deterministic Jackson serialization and strict frame validation without accepting trailing bytes.
+- [x] Run focused tests and verify golden fixtures are stable across two clean builds.
+- [x] Commit: `✨ feat(journal): define versioned queue codecs` (`8e2f120`)
 
 ### Task 8: Durable per-tenant journal engine
 
