@@ -3,6 +3,7 @@ package io.github.cocosip.stow.internal.journal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.cocosip.stow.config.JournalFormat;
 import io.github.cocosip.stow.exception.JournalCorruptionException;
 import io.github.cocosip.stow.model.FileProcessingStatus;
@@ -13,7 +14,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.zip.CRC32;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 class JournalCodecTest {
@@ -176,13 +176,11 @@ class JournalCodecTest {
         JsonLinesJournalCodec codec = new JsonLinesJournalCodec();
         ObjectNode numeric = QueueEventJson.toNode(EVENT);
         numeric.put("schemaVersion", "1");
-        assertThatThrownBy(() -> codec.decode(jsonLineWithCrc(numeric)))
-                .isInstanceOf(JournalCorruptionException.class);
+        assertThatThrownBy(() -> codec.decode(jsonLineWithCrc(numeric))).isInstanceOf(JournalCorruptionException.class);
 
         ObjectNode unknown = QueueEventJson.toNode(EVENT);
         unknown.put("unexpected", true);
-        assertThatThrownBy(() -> codec.decode(jsonLineWithCrc(unknown)))
-                .isInstanceOf(JournalCorruptionException.class);
+        assertThatThrownBy(() -> codec.decode(jsonLineWithCrc(unknown))).isInstanceOf(JournalCorruptionException.class);
 
         ObjectNode explicitNull = QueueEventJson.toNode(EVENT);
         explicitNull.putNull("leaseId");
