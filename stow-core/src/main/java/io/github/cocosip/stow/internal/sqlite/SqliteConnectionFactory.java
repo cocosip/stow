@@ -4,9 +4,11 @@ import io.github.cocosip.stow.config.SqliteConfiguration;
 import io.github.cocosip.stow.config.SqliteJournalMode;
 import io.github.cocosip.stow.config.SqliteSynchronousMode;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -26,8 +28,17 @@ public final class SqliteConnectionFactory {
     private final Path rootDirectory;
     private final String databaseFileName;
     private final SqliteConfiguration configuration;
+    private final BeforeTenantDirectoryCreate beforeTenantDirectoryCreate;
 
     public SqliteConnectionFactory(Path rootDirectory, String databaseFileName, SqliteConfiguration configuration) {
+        this(rootDirectory, databaseFileName, configuration, ignored -> {});
+    }
+
+    SqliteConnectionFactory(
+            Path rootDirectory,
+            String databaseFileName,
+            SqliteConfiguration configuration,
+            BeforeTenantDirectoryCreate beforeTenantDirectoryCreate) {
         if (rootDirectory == null) {
             throw new IllegalArgumentException("rootDirectory must not be null");
         }
@@ -49,6 +60,7 @@ public final class SqliteConnectionFactory {
         this.rootDirectory = rootDirectory.toAbsolutePath().normalize();
         this.databaseFileName = databaseFileName;
         this.configuration = configuration;
+        this.beforeTenantDirectoryCreate = beforeTenantDirectoryCreate;
     }
 
     public static SqliteConfiguration defaults() {
@@ -84,20 +96,18 @@ public final class SqliteConnectionFactory {
     }
 
     private Path resolveTenantDirectory(String tenantId) throws SQLException {
-        Path tenantDirectory = rootDirectory.resolve(tenantId).normalize();
-        if (!tenantDirectory.startsWith(rootDirectory)) {
-            throw new SQLException("Tenant database path escapes its configured root");
-        }
         try {
-            Files.createDirectories(rootDirectory);
-            Path realRoot = rootDirectory.toRealPath();
+            Path realRoot = createAndValidateRootDirectory();
+            Path tenantDirectory = realRoot.resolve(tenantId);
             if (Files.exists(tenantDirectory, LinkOption.NOFOLLOW_LINKS)) {
-                if (!Files.isDirectory(tenantDirectory, LinkOption.NOFOLLOW_LINKS)
-                        || Files.isSymbolicLink(tenantDirectory)) {
-                    throw new SQLException("Tenant database directory must not be a symbolic link or reparse point");
-                }
+                validateNormalDirectory(tenantDirectory, "Tenant database directory");
             } else {
-                Files.createDirectory(tenantDirectory);
+                beforeTenantDirectoryCreate.run(tenantDirectory);
+                try {
+                    Files.createDirectory(tenantDirectory);
+                } catch (FileAlreadyExistsException ignored) {
+                    validateNormalDirectory(tenantDirectory, "Tenant database directory");
+                }
             }
             Path realTenantDirectory = tenantDirectory.toRealPath();
             if (!realTenantDirectory.startsWith(realRoot)) {
@@ -107,6 +117,45 @@ public final class SqliteConnectionFactory {
         } catch (IOException exception) {
             throw new SQLException("Unable to create or validate tenant database directory", exception);
         }
+    }
+
+    private Path createAndValidateRootDirectory() throws IOException, SQLException {
+        Path current = rootDirectory.getRoot();
+        if (current == null) {
+            throw new SQLException("Configured SQLite root must be absolute");
+        }
+        for (Path component : rootDirectory) {
+            current = current.resolve(component);
+            if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
+                validateNormalDirectory(current, "Configured SQLite root");
+            } else {
+                try {
+                    Files.createDirectory(current);
+                } catch (FileAlreadyExistsException ignored) {
+                    validateNormalDirectory(current, "Configured SQLite root");
+                }
+            }
+        }
+        Path realRoot = current.toRealPath();
+        if (!samePath(rootDirectory, realRoot)) {
+            throw new SQLException("Configured SQLite root must not be a symbolic link or reparse point");
+        }
+        return realRoot;
+    }
+
+    private static void validateNormalDirectory(Path directory, String description) throws IOException, SQLException {
+        BasicFileAttributes attributes =
+                Files.readAttributes(directory, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        if (!attributes.isDirectory() || attributes.isSymbolicLink() || attributes.isOther()) {
+            throw new SQLException(description + " must be a normal directory, not a symbolic link or reparse point");
+        }
+    }
+
+    private static boolean samePath(Path left, Path right) {
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            return left.toString().equalsIgnoreCase(right.toString());
+        }
+        return left.equals(right);
     }
 
     private void applyPragmas(Connection connection) throws SQLException {
@@ -131,5 +180,11 @@ public final class SqliteConnectionFactory {
                 || WINDOWS_RESERVED.contains(value.toUpperCase(Locale.ROOT))) {
             throw new IllegalArgumentException("tenantId is not a valid identifier");
         }
+    }
+
+    @FunctionalInterface
+    interface BeforeTenantDirectoryCreate {
+
+        void run(Path tenantDirectory) throws SQLException;
     }
 }

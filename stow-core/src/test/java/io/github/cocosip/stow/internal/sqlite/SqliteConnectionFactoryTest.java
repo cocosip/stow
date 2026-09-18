@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.cocosip.stow.config.SqliteConfiguration;
+import io.github.cocosip.stow.config.SqliteJournalMode;
+import io.github.cocosip.stow.config.SqliteSynchronousMode;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -14,7 +17,11 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -72,6 +79,54 @@ class SqliteConnectionFactoryTest {
         assertThatThrownBy(() -> factory.open("tenant-a")).isInstanceOf(SQLException.class);
 
         assertThat(outside.resolve("metadata.db")).doesNotExist();
+    }
+
+    @Test
+    void rejectsConfiguredMetadataRootLink() throws IOException {
+        Path actualRoot = temporaryDirectory.resolve("actual-metadata");
+        Path linkedRoot = temporaryDirectory.resolve("linked-metadata");
+        Files.createDirectories(actualRoot);
+        createSymbolicLinkOrSkip(linkedRoot, actualRoot);
+        SqliteConnectionFactory factory =
+                new SqliteConnectionFactory(linkedRoot, "metadata.db", SqliteConnectionFactory.defaults());
+
+        assertThatThrownBy(() -> factory.open("tenant-a")).isInstanceOf(SQLException.class);
+
+        assertThat(actualRoot.resolve("tenant-a").resolve("metadata.db")).doesNotExist();
+    }
+
+    @Test
+    void permitsConcurrentOpenWhenTenantDirectoryIsCreatedOnce() throws Exception {
+        Path root = temporaryDirectory.resolve("concurrent-metadata");
+        CountDownLatch bothObservedMissingDirectory = new CountDownLatch(2);
+        CountDownLatch allowCreate = new CountDownLatch(1);
+        SqliteConnectionFactory factory = new SqliteConnectionFactory(
+                root,
+                "metadata.db",
+                new SqliteConfiguration(
+                        SqliteJournalMode.DELETE, SqliteSynchronousMode.NORMAL, -4_000, Duration.ofSeconds(5), false),
+                ignored -> {
+                    bothObservedMissingDirectory.countDown();
+                    await(allowCreate);
+                });
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = executor.submit(() -> {
+                openAndClose(factory);
+                return null;
+            });
+            var second = executor.submit(() -> {
+                openAndClose(factory);
+                return null;
+            });
+            assertThat(bothObservedMissingDirectory.await(1, TimeUnit.SECONDS)).isTrue();
+
+            allowCreate.countDown();
+
+            first.get(1, TimeUnit.SECONDS);
+            second.get(1, TimeUnit.SECONDS);
+        }
+        assertThat(root.resolve("tenant-a").resolve("metadata.db")).exists();
     }
 
     @Test
@@ -177,6 +232,21 @@ class SqliteConnectionFactoryTest {
             Files.createSymbolicLink(link, target.toAbsolutePath());
         } catch (UnsupportedOperationException | IOException exception) {
             Assumptions.abort("Symbolic links are unavailable in this environment: " + exception.getMessage());
+        }
+    }
+
+    private static void openAndClose(SqliteConnectionFactory factory) throws SQLException {
+        try (Connection ignored = factory.open("tenant-a")) {
+            // Opening the connection is the behavior under test.
+        }
+    }
+
+    private static void await(CountDownLatch latch) throws SQLException {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("Test directory-creation barrier was interrupted", exception);
         }
     }
 
