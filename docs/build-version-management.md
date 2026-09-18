@@ -45,13 +45,17 @@ Stow 的 Maven reactor 使用一个项目版本和一组集中管理的依赖、
 
 构建基线测试解析 reactor POM，并验证：
 
+- 从每级聚合 POM 的 `modules` 递归发现全部 reactor 模块，不维护易遗漏的固定清单；
 - 根项目版本为 `${revision}`，且存在唯一开发默认值；
 - 每个子模块父版本为 `${revision}`；
 - 子模块自身没有独立项目版本；
 - reactor 内依赖只使用 `${project.version}`；
-- 子模块第三方依赖不声明版本；
+- 子模块的 `dependencies` 和 `dependencyManagement` 中，第三方依赖不声明版本；
+- 子模块的 `build/plugins` 和 `build/pluginManagement/plugins` 中不声明插件版本；
 - 两个正式发布模块的有效版本相同；
 - samples 与 benchmarks 保持禁止部署。
+
+测试使用禁止 DOCTYPE、外部实体、外部 DTD 和外部 Schema 的 XML 解析器读取 POM，避免构建验证访问工作区外文件或网络资源。
 
 完整 `mvnw verify` 还必须验证扁平 POM 能解析为指定的具体版本，并继续执行现有格式、测试和静态分析门禁。
 

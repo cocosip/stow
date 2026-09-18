@@ -69,6 +69,7 @@ benchmarks/**
 - [x] Write `BuildBaselineTest` asserting `Runtime.version().feature() == 21` and that `org.slf4j.LoggerFactory` loads without a bundled Provider assertion.
 - [x] Run `mvnw -pl stow-core test -Dtest=BuildBaselineTest`; expect failure because reactor/modules do not exist.
 - [x] Create the reactor with exact managed versions: SLF4J 1.7.36, sqlite-jdbc 3.50.3.0, Jackson 2.20.0, JUnit 5.13.4, AssertJ 3.27.6, Mockito 5.20.0 and Awaitility 4.3.0. Configure compiler, Surefire/Failsafe, JaCoCo, Spotless, SpotBugs, source and Javadoc plugins.
+- [x] Centralize the reactor release version with `${revision}`; make every child inherit it, keep all dependency and plugin versions in the root POM, and flatten the two published artifacts to concrete release versions as specified in `docs/build-version-management.md`.
 - [x] Add `target/`, `.classpath`, `.project`, `.settings/`, `*.iml` and benchmark results to `.gitignore`; preserve existing entries.
 - [x] Run `mvnw verify`; expect all empty modules and `BuildBaselineTest` to pass with no concrete logging binding in `stow-core` dependency tree.
 - [x] Commit: `🏗️ build(maven): establish Java 21 reactor`
