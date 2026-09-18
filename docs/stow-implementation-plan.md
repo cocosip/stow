@@ -144,6 +144,8 @@ benchmarks/**
 
 ### Task 6: Tenant and directory quota reservations
 
+**Status (2026-09-18):** Complete. Implementation committed in `c283124` with review fixes in `8f29948`; final focused verification passed 19/19 tests and `stow-core clean verify` passed with 126 tests, 0 failures, 5 environment-dependent skips, clean Spotless and 0 SpotBugs findings. Independent review: all five important findings addressed; one minor directory-concurrency coverage suggestion remains deferred.
+
 **Files:**
 - Create: `internal/quota/SqliteQuotaRepository.java`, `QuotaReservation.java`, `DefaultTenantQuotaManager.java`, `DefaultDirectoryQuotaManager.java`
 - Test: `internal/quota/SqliteQuotaRepositoryTest.java`, `QuotaConcurrencyTest.java`
@@ -155,7 +157,8 @@ benchmarks/**
 - [x] Run focused tests; expect failure.
 - [x] Implement optimistic row-version transactions, logical-directory normalization, unlimited zero limits and idempotent consume/rollback/release.
 - [x] Add crash-style reopen tests proving reservations survive and can be reconciled.
-- [x] Commit: `✨ feat(quota): add durable atomic reservations`
+- [x] Commit: `✨ feat(quota): add durable atomic reservations` (`c283124`), with review fixes in `8f29948`.
+- [x] Complete independent review; five important findings addressed, one minor coverage suggestion deferred.
 
 ### Task 7: Journal codecs and format detection
 
