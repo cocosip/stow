@@ -8,6 +8,7 @@
 4. [持久化与恢复契约](stow-persistence-contract.md)：目录布局、journal、SQLite schema、状态迁移和恢复不变量。
 5. [实现计划](stow-implementation-plan.md)：测试先行的任务顺序、文件、命令、提交边界和阶段进度。
 6. [构建与版本管理](build-version-management.md)：统一项目版本、依赖/插件版本和发布 POM 规则。
+7. [日志](logging.md)：核心日志门面、provider 选择和 SLF4J 2.x 兼容 profile。
 
 设计、API、持久化和实现计划共同构成 Stow 1.0 基线。若实现与文档冲突，先修正文档并说明原因，再修改代码。任何 Locus 2.0 对齐项都不得以“后续补充”为由移出 1.0。
 
