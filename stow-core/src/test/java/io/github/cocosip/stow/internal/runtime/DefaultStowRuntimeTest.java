@@ -9,6 +9,7 @@ import io.github.cocosip.stow.Stow;
 import io.github.cocosip.stow.StowRuntime;
 import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.exception.RuntimeDirectoryLockedException;
+import io.github.cocosip.stow.exception.RuntimeNotReadyException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,9 +20,12 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -185,6 +189,58 @@ class DefaultStowRuntimeTest {
                             .maxFiles())
                     .isEqualTo(7);
         }
+    }
+
+    @Test
+    void retainedQuotaManagersRejectOperationsAfterRuntimeCloses() {
+        StowRuntime runtime = Stow.open(configuration("retained-quota-manager"));
+        runtime.tenantManager().create("tenant-a");
+        var tenantQuotas = runtime.tenantQuotaManager();
+        var directoryQuotas = runtime.directoryQuotaManager();
+
+        runtime.close();
+
+        assertThatThrownBy(() -> tenantQuotas.limit("tenant-a")).isInstanceOf(RuntimeNotReadyException.class);
+        assertThatThrownBy(() -> tenantQuotas.setLimit("tenant-a", 5)).isInstanceOf(RuntimeNotReadyException.class);
+        assertThatThrownBy(() -> directoryQuotas.get("tenant-a", "/incoming"))
+                .isInstanceOf(RuntimeNotReadyException.class);
+        assertThatThrownBy(() -> directoryQuotas.setLimit("tenant-a", "/incoming", 5))
+                .isInstanceOf(RuntimeNotReadyException.class);
+    }
+
+    @Test
+    void quotaShutdownWaitsForAdmittedOperationsBeforeCleanup() throws Exception {
+        AtomicReference<RuntimeState> runtimeState = new AtomicReference<>(RuntimeState.RUNNING);
+        RuntimeQuotaOperationAdmission admission = new RuntimeQuotaOperationAdmission(runtimeState);
+        CountDownLatch closingStarted = new CountDownLatch(1);
+        CountDownLatch cleanupRan = new CountDownLatch(1);
+        admission.enter();
+        boolean operationAdmitted = true;
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var close = executor.submit(() -> admission.closeAdmission(
+                    () -> {
+                        runtimeState.set(RuntimeState.STOPPING);
+                        closingStarted.countDown();
+                    },
+                    () -> {
+                        runtimeState.set(RuntimeState.TERMINATED);
+                        cleanupRan.countDown();
+                    }));
+            assertThat(closingStarted.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(cleanupRan.getCount()).isEqualTo(1);
+
+            admission.exit();
+            operationAdmitted = false;
+            close.get(1, TimeUnit.SECONDS);
+        } finally {
+            if (operationAdmitted) {
+                admission.exit();
+            }
+        }
+
+        assertThat(cleanupRan.getCount()).isZero();
+        assertThatThrownBy(admission::enter).isInstanceOf(RuntimeNotReadyException.class);
     }
 
     @Test

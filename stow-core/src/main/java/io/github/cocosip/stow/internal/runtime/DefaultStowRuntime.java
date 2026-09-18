@@ -46,6 +46,7 @@ public final class DefaultStowRuntime implements StowRuntime {
     private final JournalCodec journalCodec;
     private final List<ManagedBackgroundService> backgroundServices;
     private final AtomicReference<RuntimeState> state = new AtomicReference<>(RuntimeState.NEW);
+    private final RuntimeQuotaOperationAdmission quotaOperationAdmission = new RuntimeQuotaOperationAdmission(state);
     private final Deque<AutoCloseable> ownedResources = new ArrayDeque<>();
 
     private ExecutorService workerExecutor;
@@ -116,9 +117,12 @@ public final class DefaultStowRuntime implements StowRuntime {
         if (current == RuntimeState.TERMINATED) {
             return;
         }
-        state.set(RuntimeState.STOPPING);
-        RuntimeException failure = closeOwnedResources();
-        state.set(RuntimeState.TERMINATED);
+        AtomicReference<RuntimeException> closeFailure = new AtomicReference<>();
+        quotaOperationAdmission.closeAdmission(() -> state.set(RuntimeState.STOPPING), () -> {
+            closeFailure.set(closeOwnedResources());
+            state.set(RuntimeState.TERMINATED);
+        });
+        RuntimeException failure = closeFailure.get();
         if (failure != null) {
             throw failure;
         }
@@ -138,13 +142,13 @@ public final class DefaultStowRuntime implements StowRuntime {
     @Override
     public TenantQuotaManager tenantQuotaManager() {
         ensureRunning();
-        return new DefaultTenantQuotaManager(quotaRepository);
+        return new DefaultTenantQuotaManager(quotaRepository, quotaOperationAdmission);
     }
 
     @Override
     public DirectoryQuotaManager directoryQuotaManager() {
         ensureRunning();
-        return new DefaultDirectoryQuotaManager(quotaRepository);
+        return new DefaultDirectoryQuotaManager(quotaRepository, quotaOperationAdmission);
     }
 
     @Override

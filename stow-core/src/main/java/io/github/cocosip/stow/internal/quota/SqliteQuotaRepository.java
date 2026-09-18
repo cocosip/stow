@@ -1,13 +1,9 @@
 package io.github.cocosip.stow.internal.quota;
 
 import io.github.cocosip.stow.config.SqliteConfiguration;
-import io.github.cocosip.stow.exception.DatabaseRecoveryException;
 import io.github.cocosip.stow.exception.DirectoryQuotaExceededException;
 import io.github.cocosip.stow.exception.ProjectionException;
-import io.github.cocosip.stow.exception.StowInterruptedException;
 import io.github.cocosip.stow.exception.TenantQuotaExceededException;
-import io.github.cocosip.stow.internal.sqlite.SqliteConnectionFactory;
-import io.github.cocosip.stow.internal.sqlite.SqliteSchemaManager;
 import io.github.cocosip.stow.model.DirectoryQuota;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -15,69 +11,23 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Clock;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.ToLongFunction;
 import java.util.regex.Pattern;
 
 public final class SqliteQuotaRepository {
 
-    private static final int SCHEMA_VERSION = 1;
     private static final Pattern FILE_KEY = Pattern.compile("[0-9a-f]{32}");
-    private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
-    private static final List<String> CREATE_STATEMENTS = List.of(
-            """
-            CREATE TABLE tenant_quota (
-                singleton_id                INTEGER PRIMARY KEY CHECK(singleton_id = 1),
-                current_count               INTEGER NOT NULL DEFAULT 0 CHECK(current_count >= 0),
-                max_count                   INTEGER NOT NULL DEFAULT 0 CHECK(max_count >= 0),
-                updated_at_ms               INTEGER NOT NULL,
-                row_version                 INTEGER NOT NULL DEFAULT 0
-            )
-            """,
-            """
-            CREATE TABLE directory_quotas (
-                logical_directory           TEXT PRIMARY KEY NOT NULL,
-                current_count               INTEGER NOT NULL DEFAULT 0 CHECK(current_count >= 0),
-                max_count                   INTEGER NOT NULL DEFAULT 0 CHECK(max_count >= 0),
-                enabled                     INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
-                created_at_ms               INTEGER NOT NULL,
-                updated_at_ms               INTEGER NOT NULL,
-                row_version                 INTEGER NOT NULL DEFAULT 0
-            )
-            """,
-            """
-            CREATE TABLE quota_reservations (
-                reservation_id              TEXT PRIMARY KEY NOT NULL,
-                file_key                    TEXT NOT NULL UNIQUE,
-                logical_directory           TEXT NOT NULL,
-                created_at_ms               INTEGER NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE applied_quota_events (
-                event_id                    TEXT PRIMARY KEY NOT NULL,
-                sequence_number             INTEGER NOT NULL UNIQUE,
-                applied_at_ms               INTEGER NOT NULL
-            )
-            """);
-
-    private final SqliteConnectionFactory connections;
-    private final SqliteSchemaManager schema = new SqliteSchemaManager(SCHEMA_VERSION);
-    private final Clock clock;
-    private final ToLongFunction<String> initialTenantLimit;
+    private final QuotaDatabaseExecutor database;
+    private final QuotaEventLedger events = new QuotaEventLedger();
 
     public SqliteQuotaRepository(
             Path quotaDirectory,
             SqliteConfiguration sqliteConfiguration,
             Clock clock,
             ToLongFunction<String> initialTenantLimit) {
-        connections = new SqliteConnectionFactory(quotaDirectory, "quotas.db", sqliteConfiguration);
-        this.clock = java.util.Objects.requireNonNull(clock, "clock");
-        this.initialTenantLimit = java.util.Objects.requireNonNull(initialTenantLimit, "initialTenantLimit");
+        database = new QuotaDatabaseExecutor(quotaDirectory, sqliteConfiguration, clock, initialTenantLimit);
     }
 
     public long tenantCurrentCount(String tenantId) {
@@ -195,14 +145,17 @@ public final class SqliteQuotaRepository {
 
     public void consume(String tenantId, String eventId, long sequenceNumber, String reservationId) {
         requireText("reservationId", reservationId);
+        events.validate(eventId, sequenceNumber);
         write(tenantId, connection -> {
-            if (!markEvent(connection, eventId, sequenceNumber)) {
+            if (!events.mark(connection, eventId, sequenceNumber, nowMillis())) {
                 return null;
             }
             try (PreparedStatement statement =
                     connection.prepareStatement("DELETE FROM quota_reservations WHERE reservation_id=?")) {
                 statement.setString(1, reservationId);
-                statement.executeUpdate();
+                if (statement.executeUpdate() != 1) {
+                    throw new ProjectionException("Quota reservation does not exist: " + reservationId);
+                }
             }
             return null;
         });
@@ -227,9 +180,10 @@ public final class SqliteQuotaRepository {
 
     public void release(String tenantId, String eventId, long sequenceNumber, String fileKey, String logicalDirectory) {
         requireFileKey(fileKey);
+        events.validate(eventId, sequenceNumber);
         String normalized = normalizeDirectory(tenantId, logicalDirectory);
         write(tenantId, connection -> {
-            if (!markEvent(connection, eventId, sequenceNumber)) {
+            if (!events.mark(connection, eventId, sequenceNumber, nowMillis())) {
                 return null;
             }
             decrementCounts(connection, normalized);
@@ -238,54 +192,11 @@ public final class SqliteQuotaRepository {
     }
 
     private <T> T read(String tenantId, SqlOperation<T> operation) {
-        return execute(tenantId, false, operation);
+        return database.read(tenantId, operation::run);
     }
 
     private <T> T write(String tenantId, SqlOperation<T> operation) {
-        return execute(tenantId, true, operation);
-    }
-
-    private <T> T execute(String tenantId, boolean transactional, SqlOperation<T> operation) {
-        Path databasePath = connections.databasePath(tenantId);
-        ReentrantLock lock = LOCKS.computeIfAbsent(databasePath, ignored -> new ReentrantLock());
-        acquireInterruptibly(lock);
-        try (Connection connection = connections.open(tenantId)) {
-            schema.ensureSchema(connection, CREATE_STATEMENTS);
-            if (transactional) {
-                connection.setAutoCommit(false);
-            }
-            try {
-                ensureTenant(connection, tenantId);
-                T result = operation.run(connection);
-                if (transactional) {
-                    connection.commit();
-                }
-                return result;
-            } catch (SQLException | RuntimeException failure) {
-                if (transactional) {
-                    rollback(connection, failure);
-                }
-                throw failure;
-            }
-        } catch (SQLException exception) {
-            throw new DatabaseRecoveryException("Unable to access quota database for tenant " + tenantId, exception);
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void ensureTenant(Connection connection, String tenantId) throws SQLException {
-        long initialLimit = initialTenantLimit.applyAsLong(tenantId);
-        requireNonNegative("initial tenant quota", initialLimit);
-        try (PreparedStatement statement = connection.prepareStatement(
-                """
-                INSERT OR IGNORE INTO tenant_quota(singleton_id, current_count, max_count, updated_at_ms, row_version)
-                VALUES(1, 0, ?, ?, 0)
-                """)) {
-            statement.setLong(1, initialLimit);
-            statement.setLong(2, nowMillis());
-            statement.executeUpdate();
-        }
+        return database.write(tenantId, operation::run);
     }
 
     private void ensureDirectory(Connection connection, String logicalDirectory) throws SQLException {
@@ -405,47 +316,8 @@ public final class SqliteQuotaRepository {
         }
     }
 
-    private boolean markEvent(Connection connection, String eventId, long sequenceNumber) throws SQLException {
-        requireText("eventId", eventId);
-        if (sequenceNumber < 0) {
-            throw new IllegalArgumentException("sequenceNumber must not be negative");
-        }
-        try (PreparedStatement statement =
-                connection.prepareStatement("SELECT sequence_number FROM applied_quota_events WHERE event_id=?")) {
-            statement.setString(1, eventId);
-            try (ResultSet result = statement.executeQuery()) {
-                if (result.next()) {
-                    if (result.getLong(1) != sequenceNumber) {
-                        throw new ProjectionException("Quota event ID was already applied with a different sequence");
-                    }
-                    return false;
-                }
-            }
-        }
-        try (PreparedStatement statement =
-                connection.prepareStatement("SELECT event_id FROM applied_quota_events WHERE sequence_number=?")) {
-            statement.setLong(1, sequenceNumber);
-            try (ResultSet result = statement.executeQuery()) {
-                if (result.next()) {
-                    throw new ProjectionException("Quota sequence was already applied by a different event");
-                }
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(
-                """
-                INSERT INTO applied_quota_events(event_id, sequence_number, applied_at_ms)
-                VALUES(?, ?, ?)
-                """)) {
-            statement.setString(1, eventId);
-            statement.setLong(2, sequenceNumber);
-            statement.setLong(3, nowMillis());
-            statement.executeUpdate();
-        }
-        return true;
-    }
-
     private long nowMillis() {
-        return clock.instant().toEpochMilli();
+        return database.nowMillis();
     }
 
     private static String normalizeDirectory(String tenantId, String logicalDirectory) {
@@ -473,22 +345,6 @@ public final class SqliteQuotaRepository {
     private static void requireSingleOptimisticUpdate(int updated, String operation) {
         if (updated != 1) {
             throw new ProjectionException("Concurrent row-version conflict during " + operation);
-        }
-    }
-
-    private static void acquireInterruptibly(ReentrantLock lock) {
-        try {
-            lock.lockInterruptibly();
-        } catch (InterruptedException exception) {
-            throw new StowInterruptedException("Interrupted while waiting for the quota repository lock", exception);
-        }
-    }
-
-    private static void rollback(Connection connection, Throwable failure) {
-        try {
-            connection.rollback();
-        } catch (SQLException rollbackFailure) {
-            failure.addSuppressed(rollbackFailure);
         }
     }
 

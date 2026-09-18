@@ -119,6 +119,36 @@ class SqliteQuotaRepositoryTest {
     }
 
     @Test
+    void rejectsNonPositiveJournalSequencesWithoutChangingQuotaState() throws Exception {
+        SqliteQuotaRepository repository = repository(10);
+        QuotaReservation reservation = repository.reserve(TENANT_ID, FILE_KEY, "/incoming");
+
+        assertThatThrownBy(() -> repository.consume(TENANT_ID, "zero-sequence", 0, reservation.reservationId()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.release(TENANT_ID, "negative-sequence", -1, FILE_KEY, "/incoming"))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(repository.tenantCurrentCount(TENANT_ID)).isEqualTo(1);
+        assertThat(repository.directoryQuota(TENANT_ID, "/incoming").currentCount())
+                .isEqualTo(1);
+        assertThat(repository.reservation(TENANT_ID, FILE_KEY)).contains(reservation);
+        assertThat(appliedEventCount()).isZero();
+    }
+
+    @Test
+    void rejectsFirstConsumeWhenReservationDoesNotExistAndRollsBackEvent() throws Exception {
+        SqliteQuotaRepository repository = repository(10);
+        QuotaReservation reservation = repository.reserve(TENANT_ID, FILE_KEY, "/incoming");
+
+        assertThatThrownBy(() -> repository.consume(TENANT_ID, "accepted-event", 41, "missing-reservation"))
+                .isInstanceOf(ProjectionException.class);
+
+        assertThat(repository.reservation(TENANT_ID, FILE_KEY)).contains(reservation);
+        assertThat(repository.tenantCurrentCount(TENANT_ID)).isEqualTo(1);
+        assertThat(appliedEventCount()).isZero();
+    }
+
+    @Test
     void reservationsPersistAcrossReopenAndCanBeConsumedOrRolledBack() {
         SqliteQuotaRepository first = repository(2);
         QuotaReservation toConsume = first.reserve(TENANT_ID, FILE_KEY, "incoming");
@@ -143,6 +173,14 @@ class SqliteQuotaRepositoryTest {
     private SqliteQuotaRepository repository(long initialLimit) {
         return new SqliteQuotaRepository(
                 temporaryDirectory, SqliteConnectionFactory.defaults(), CLOCK, ignored -> initialLimit);
+    }
+
+    private long appliedEventCount() throws Exception {
+        Path database = temporaryDirectory.resolve(TENANT_ID).resolve("quotas.db");
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + database);
+                Statement statement = connection.createStatement()) {
+            return queryLong(statement, "SELECT COUNT(*) FROM applied_quota_events");
+        }
     }
 
     private static long queryLong(Statement statement, String sql) throws Exception {
