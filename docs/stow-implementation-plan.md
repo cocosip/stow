@@ -100,12 +100,12 @@ benchmarks/**
 
 **Interfaces:** Consumes `StowConfiguration`; produces `Stow.builder()`, `Stow.open()`, lifecycle state and resource ownership rules.
 
-- [ ] Write tests for `NEW -> STARTING -> RUNNING -> STOPPING -> TERMINATED`, failed start, duplicate start, idempotent close, reverse-order close and caller-owned executor preservation.
-- [ ] Add a test opening two runtimes against the same roots; expect the second to fail with `RuntimeDirectoryLockedException`.
-- [ ] Run the focused test; expect failure for missing runtime.
-- [ ] Implement the directory lock and lifecycle without starting threads in `build()`; use `AtomicReference<RuntimeState>` and an ordered resource stack.
-- [ ] Run `mvnw -pl stow-core test -Dtest=DefaultStowRuntimeTest`; expect pass and no leaked `stow-*` threads.
-- [ ] Commit: `✨ feat(runtime): add framework-neutral lifecycle`
+- [x] Write tests for `NEW -> STARTING -> RUNNING -> STOPPING -> TERMINATED`, failed start, duplicate start, idempotent close, reverse-order close and caller-owned executor preservation.
+- [x] Add a test opening two runtimes against the same roots; expect the second to fail with `RuntimeDirectoryLockedException`.
+- [x] Run the focused test; expect failure for missing runtime.
+- [x] Implement the directory lock and lifecycle without starting threads in `build()`; use `AtomicReference<RuntimeState>` and an ordered resource stack.
+- [x] Run `mvnw -pl stow-core test -Dtest=DefaultStowRuntimeTest`; expect pass and no leaked `stow-*` threads.
+- [x] Commit: `✨ feat(runtime): add framework-neutral lifecycle`
 
 ### Task 4: SQLite foundation and tenant persistence
 
