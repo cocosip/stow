@@ -98,13 +98,35 @@ class BuildBaselineTest {
                       </plugins>
                     </pluginManagement>
                   </build>
+                  <profiles>
+                    <profile>
+                      <id>version-drift</id>
+                      <dependencies>
+                        <dependency>
+                          <groupId>org.example</groupId>
+                          <artifactId>profile-library</artifactId>
+                          <version>4.0</version>
+                        </dependency>
+                      </dependencies>
+                      <build>
+                        <pluginManagement>
+                          <plugins>
+                            <plugin>
+                              <artifactId>profile-plugin</artifactId>
+                              <version>5.0</version>
+                            </plugin>
+                          </plugins>
+                        </pluginManagement>
+                      </build>
+                    </profile>
+                  </profiles>
                 </project>
                 """);
         Element childProject = parseProject(childPom);
 
-        assertThat(thirdPartyDependencyVersions(List.of(childProject))).containsExactly("1.2.3");
+        assertThat(thirdPartyDependencyVersions(List.of(childProject))).containsExactly("1.2.3", "4.0");
         assertThat(reactorDependencyVersions(List.of(childProject))).containsExactly("${project.version}");
-        assertThat(pluginVersions(List.of(childProject))).containsExactlyInAnyOrder("2.0", "3.0");
+        assertThat(pluginVersions(List.of(childProject))).containsExactlyInAnyOrder("2.0", "3.0", "5.0");
     }
 
     @Test
@@ -290,17 +312,28 @@ class BuildBaselineTest {
 
     private static List<Element> dependencies(Element project) {
         List<Element> result = new ArrayList<>();
-        addChildren(result, child(project, "dependencies"), "dependency");
-        addChildren(result, child(child(project, "dependencyManagement"), "dependencies"), "dependency");
+        for (Element scope : versionScopes(project)) {
+            addChildren(result, child(scope, "dependencies"), "dependency");
+            addChildren(result, child(child(scope, "dependencyManagement"), "dependencies"), "dependency");
+        }
         return result;
     }
 
     private static List<Element> plugins(Element project) {
-        Element build = child(project, "build");
         List<Element> result = new ArrayList<>();
-        addChildren(result, child(build, "plugins"), "plugin");
-        addChildren(result, child(child(build, "pluginManagement"), "plugins"), "plugin");
+        for (Element scope : versionScopes(project)) {
+            Element build = child(scope, "build");
+            addChildren(result, child(build, "plugins"), "plugin");
+            addChildren(result, child(child(build, "pluginManagement"), "plugins"), "plugin");
+        }
         return result;
+    }
+
+    private static List<Element> versionScopes(Element project) {
+        List<Element> scopes = new ArrayList<>();
+        scopes.add(project);
+        addChildren(scopes, child(project, "profiles"), "profile");
+        return scopes;
     }
 
     private static void addChildren(List<Element> result, Element parent, String name) {

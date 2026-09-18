@@ -50,8 +50,8 @@ Stow 的 Maven reactor 使用一个项目版本和一组集中管理的依赖、
 - 每个子模块父版本为 `${revision}`；
 - 子模块自身没有独立项目版本；
 - reactor 内依赖只使用 `${project.version}`；
-- 子模块的 `dependencies` 和 `dependencyManagement` 中，第三方依赖不声明版本；
-- 子模块的 `build/plugins` 和 `build/pluginManagement/plugins` 中不声明插件版本；
+- 子模块顶层及每个 profile 的 `dependencies` 和 `dependencyManagement` 中，第三方依赖不声明版本；
+- 子模块顶层及每个 profile 的 `build/plugins` 和 `build/pluginManagement/plugins` 中不声明插件版本；
 - 两个正式发布模块的有效版本相同；
 - samples 与 benchmarks 保持禁止部署。
 
