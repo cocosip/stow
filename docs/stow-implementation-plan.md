@@ -213,18 +213,20 @@ benchmarks/**
 
 ### Task 10: Storage write/read pipeline
 
+**Status (2026-09-19):** Complete. `DefaultStoragePool`, repeatable/non-repeatable content sources, atomic physical writes, quota compensation, journal acceptance, projection, ownership-safe reads, and capacity aggregation committed in `9f2e578`; focused tests pass.
+
 **Files:**
 - Create: `internal/scheduler/DefaultStoragePool.java`, `CountingInputStream.java`, `WriteCompensation.java`
 - Test: `internal/scheduler/StorageWriteReadTest.java`, `StorageWriteFailureTest.java`
 
 **Interfaces:** Implements StoragePool write/read/info/location/capacity; consumes tenant, quota, volume, journal and projection services.
 
-- [ ] Write happy-path tests for repeatable path/byte-array ContentSource, non-repeatable InputStream, extensions, logical directories, read ownership and capacity totals.
-- [ ] Write failure-injection tests at reservation, physical write, atomic move, ACCEPTED append and projection enqueue boundaries.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement both StoragePool write overloads and the six persistence boundaries; only retry another volume when `ContentSource.repeatable()` is true.
-- [ ] Reopen runtime after each injected failure and assert no silent file loss or released quota while a file remains.
-- [ ] Commit: `✨ feat(storage): implement durable write and read paths`
+- [x] Write happy-path tests for repeatable path/byte-array ContentSource, non-repeatable InputStream, extensions, logical directories, read ownership and capacity totals.
+- [x] Write failure-injection tests at reservation, physical write, atomic move, ACCEPTED append and projection enqueue boundaries.
+- [x] Run focused tests; expect failure.
+- [x] Implement both StoragePool write overloads and the six persistence boundaries; only retry another volume when `ContentSource.repeatable()` is true.
+- [x] Reopen runtime after each injected failure and assert no silent file loss or released quota while a file remains.
+- [x] Commit: `✨ feat(storage): implement durable write and read paths` (`9f2e578`)
 
 ### Task 11: Leasing, retry, completion, and timeout recovery
 
