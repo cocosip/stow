@@ -33,8 +33,8 @@
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <maven.compiler.release>21</maven.compiler.release>
 
-    <slf4j.version>1.7.36</slf4j.version>
-    <slf4j2.version>2.0.17</slf4j2.version>
+    <slf4j.version>2.0.17</slf4j.version>
+    <slf4j1.version>1.7.36</slf4j1.version>
     <sqlite-jdbc.version>3.50.3.0</sqlite-jdbc.version>
     <jackson.version>2.20.0</jackson.version>
     <junit.version>5.13.4</junit.version>
@@ -375,9 +375,9 @@
 
   <profiles>
     <profile>
-      <id>slf4j2-compat</id>
+      <id>slf4j1-compat</id>
       <properties>
-        <slf4j.version>${slf4j2.version}</slf4j.version>
+        <slf4j.version>${slf4j1.version}</slf4j.version>
       </properties>
       <dependencies>
         <dependency>

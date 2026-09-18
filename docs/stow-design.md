@@ -143,7 +143,7 @@ io.github.cocosip.stow
 - Java：OpenJDK 21，Maven Compiler 使用 `--release 21`。
 - SQLite：`org.xerial:sqlite-jdbc`，使用 JDBC 直接访问；不引入 ORM 或连接池。
 - JSON：Jackson 2.x，用于状态文件、快照、租户和 watcher 配置以及 JsonLines 日志格式。
-- 日志：`org.slf4j:slf4j-api:1.7.36`。
+- 日志：`org.slf4j:slf4j-api:2.0.17`。
 - 测试：JUnit Jupiter、AssertJ、Mockito、Awaitility。
 - 基准测试：JMH。
 - 构建质量：Maven Enforcer、Surefire、Failsafe、JaCoCo、Spotless 和 SpotBugs。
@@ -152,12 +152,12 @@ io.github.cocosip.stow
 
 ### 7.2 SLF4J 兼容策略
 
-`stow-core` 的日志门面只依赖 `slf4j-api:1.7.36`，不携带 Logback、Log4j2、JUL bridge 或任何绑定/Provider。选择 1.7.36 是为了让传统应用直接使用，同时允许宿主在自己的依赖管理中把 API 覆盖为 SLF4J 2.x。SLF4J 2.x 对使用 1.7 API 编译的调用代码保持二进制兼容，但宿主必须使用与 2.x API 匹配的 Provider。
+`stow-core` 的日志门面只依赖 `slf4j-api:2.0.17`，不携带 Logback、Log4j2、JUL bridge 或任何绑定/Provider。宿主在应用边界选择一个与 2.x API 匹配的 provider；传统 1.7 宿主可通过兼容 profile 验证。
 
 验证矩阵必须覆盖：
 
+- `slf4j-api 2.0.17` + 2.x Provider；
 - `slf4j-api 1.7.36` + 1.7 兼容测试绑定；
-- `slf4j-api 2.x` + 2.x Provider；
 - 无 Provider 时只出现 SLF4J 自身提示，Stow 功能仍可运行；
 - 依赖树中不得由 `stow-core` 引入具体日志实现。
 
@@ -572,7 +572,7 @@ Starter 只负责适配，不包含第二套业务实现：
 
 ```text
 mvnw verify
-mvnw -Pslf4j2-compat verify
+mvnw -Pslf4j1-compat verify
 mvnw -Pspring-boot-compat verify
 mvnw -Pbenchmarks package
 ```

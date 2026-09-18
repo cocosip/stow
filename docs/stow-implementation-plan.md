@@ -6,7 +6,7 @@
 
 **Architecture:** `stow-core` 使用框架无关的构造器注入和内部组合根，物理文件、每租户 journal、SQLite 投影分别承担多租户内容事实、队列事实和查询投影。`stow-spring-boot-starter` 只绑定配置和生命周期，不复制业务逻辑。
 
-**Tech Stack:** Java 21、Maven、SQLite JDBC、Jackson 2.x、SLF4J API 1.7.36、JUnit Jupiter、AssertJ、Mockito、Awaitility、JMH、Spring Boot 3.5/4.x。
+**Tech Stack:** Java 21、Maven、SQLite JDBC、Jackson 2.x、SLF4J API 2.0.17、JUnit Jupiter、AssertJ、Mockito、Awaitility、JMH、Spring Boot 3.5/4.x。
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - Maven 坐标固定为 `io.github.cocosip:stow-core` 与 `io.github.cocosip:stow-spring-boot-starter`。
 - 根包固定为 `io.github.cocosip.stow`；JDK 编译参数固定为 `--release 21`。
 - `stow-core` 不依赖 Spring、CDI、Guice、Micrometer、Actuator 或具体日志 Provider。
-- 核心日志依赖固定为 `org.slf4j:slf4j-api:1.7.36`，并验证 SLF4J 2.x 覆盖运行。
+- 核心日志依赖固定为 `org.slf4j:slf4j-api:2.0.17`，并提供 1.7.36 宿主兼容验证。
 - 公开 API 使用同步阻塞模型，全部线程安全并响应线程中断。
 - 只发布两个正式 JAR；samples、benchmarks 和兼容测试模块设置 `maven.deploy.skip=true`。
 - 每个实现任务先提交失败测试，再写最小实现；不得通过 sleep、重试测试或放宽断言掩盖竞态。
@@ -68,7 +68,7 @@ benchmarks/**
 
 - [x] Write `BuildBaselineTest` asserting `Runtime.version().feature() == 21` and that `org.slf4j.LoggerFactory` loads without a bundled Provider assertion.
 - [x] Run `mvnw -pl stow-core test -Dtest=BuildBaselineTest`; expect failure because reactor/modules do not exist.
-- [x] Create the reactor with exact managed versions: SLF4J 1.7.36, sqlite-jdbc 3.50.3.0, Jackson 2.20.0, JUnit 5.13.4, AssertJ 3.27.6, Mockito 5.20.0 and Awaitility 4.3.0. Configure compiler, Surefire/Failsafe, JaCoCo, Spotless, SpotBugs, source and Javadoc plugins.
+- [x] Create the reactor with exact managed versions: SLF4J 2.0.17, sqlite-jdbc 3.50.3.0, Jackson 2.20.0, JUnit 5.13.4, AssertJ 3.27.6, Mockito 5.20.0 and Awaitility 4.3.0. Configure compiler, Surefire/Failsafe, JaCoCo, Spotless, SpotBugs, source and Javadoc plugins.
 - [x] Centralize the reactor release version with `${revision}`; make every child inherit it, keep all dependency and plugin versions in the root POM, and flatten the two published artifacts to concrete release versions as specified in `docs/build-version-management.md`.
 - [x] Add `target/`, `.classpath`, `.project`, `.settings/`, `*.iml` and benchmark results to `.gitignore`; preserve existing entries.
 - [x] Run `mvnw verify`; expect all empty modules and `BuildBaselineTest` to pass with no concrete logging binding in `stow-core` dependency tree.
@@ -352,7 +352,7 @@ benchmarks/**
 
 - [ ] Implement a forked-JVM crash harness for every row in persistence contract section 15 and assert deterministic recovery after process termination.
 - [ ] Add multi-producer/multi-consumer stress, file-handle/thread leak, long-run WAL/journal growth and bounded-queue backpressure tests.
-- [ ] Run `mvnw verify`, `mvnw -Pslf4j2-compat verify` and `mvnw -Pspring-boot-compat verify`; all must pass.
+- [ ] Run `mvnw verify`, `mvnw -Pslf4j1-compat verify` and `mvnw -Pspring-boot-compat verify`; all must pass.
 - [ ] Run `mvnw -Pbenchmarks package`; capture baseline results without defining correctness thresholds from benchmark noise.
 - [ ] Run dependency vulnerability/license checks, dependency tree scan for logging bindings, API compatibility check, source/Javadoc package and reproducible-build comparison.
 - [ ] Compare the completed code against every row in `docs/stow-design.md` section 25 and record command evidence in `docs/release-verification.md`.
@@ -365,7 +365,7 @@ Run from repository root in this order:
 ```powershell
 .\mvnw.cmd spotless:check
 .\mvnw.cmd verify
-.\mvnw.cmd -Pslf4j2-compat verify
+.\mvnw.cmd -Pslf4j1-compat verify
 .\mvnw.cmd -Pspring-boot-compat verify
 .\mvnw.cmd -Pbenchmarks package
 git diff --check

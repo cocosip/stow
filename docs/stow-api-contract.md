@@ -10,7 +10,7 @@
 - 核心 API：同步阻塞、线程安全、虚拟线程友好
 - 时间：`java.time.Instant` 与 `java.time.Duration`
 - 可空查询结果：`Optional<T>`；集合永不返回 `null`
-- 日志：仅依赖 `slf4j-api:1.7.36`，不携带 Provider
+- 日志：仅依赖 `slf4j-api:2.0.17`，不携带 Provider；provider 由宿主选择
 
 `io.github.cocosip.stow.internal` 下的类型不属于兼容承诺。公开 API 只能暴露根包、`api`、`model`、`config`、`exception` 和明确公开的 `spi` 类型。
 
