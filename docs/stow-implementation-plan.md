@@ -132,12 +132,12 @@ benchmarks/**
 
 **Interfaces:** Implements `StorageVolume`; produces validated shard paths, atomic write/read/delete/move, health/capacity probes and ordered write candidates.
 
-- [ ] Write Windows/Linux-safe tests for traversal, reserved tenant names, extension sanitizing, sharding depth 0-3, symlink escape, temp cleanup and atomic visibility.
-- [ ] Write selector tests proving unhealthy/full volumes are excluded and repeated choices distribute writes.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement file keys as 32 lowercase hex characters, same-directory temp writes, optional `FileChannel.force(true)`, atomic move and cached health/capacity.
-- [ ] Run focused tests on real temporary directories; expect pass.
-- [ ] Commit: `✨ feat(filesystem): add durable multi-volume storage`
+- [x] Write Windows/Linux-safe tests for traversal, reserved tenant names, extension sanitizing, sharding depth 0-3, symlink escape, temp cleanup and atomic visibility.
+- [x] Write selector tests proving unhealthy/full volumes are excluded and repeated choices distribute writes.
+- [x] Run focused tests; expect failure.
+- [x] Implement file keys as 32 lowercase hex characters, same-directory temp writes, optional `FileChannel.force(true)`, atomic move and cached health/capacity.
+- [x] Run focused tests on real temporary directories; expect pass.
+- [x] Commit: `✨ feat(filesystem): add durable multi-volume storage`
 
 ### Task 6: Tenant and directory quota reservations
 
