@@ -18,16 +18,31 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
-import java.util.UUID;
 import java.util.Set;
+import java.util.UUID;
 
 final class QueueEventJson {
 
     private static final Set<String> FIELD_NAMES = Set.of(
-            "schemaVersion", "eventId", "tenantId", "fileKey", "eventType", "occurredAt",
-            "sequenceNumber", "volumeId", "physicalPath", "logicalDirectory", "fileSize", "status",
-            "leaseId", "processingStartedAt", "retryCount", "availableAt", "errorMessage",
-            "originalFileName", "fileExtension");
+            "schemaVersion",
+            "eventId",
+            "tenantId",
+            "fileKey",
+            "eventType",
+            "occurredAt",
+            "sequenceNumber",
+            "volumeId",
+            "physicalPath",
+            "logicalDirectory",
+            "fileSize",
+            "status",
+            "leaseId",
+            "processingStartedAt",
+            "retryCount",
+            "availableAt",
+            "errorMessage",
+            "originalFileName",
+            "fileExtension");
 
     static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new Jdk8Module())
