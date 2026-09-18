@@ -179,18 +179,20 @@ benchmarks/**
 
 ### Task 8: Durable per-tenant journal engine
 
+**Status (2026-09-18):** Complete. Durable per-tenant writers, ACK modes, ordering, bounded queues, tail repair, state recovery, format detection, compaction suffix recovery, and tenant isolation committed in `7ef7cf6`; focused and `stow-core` tests pass.
+
 **Files:**
 - Create: `internal/journal/FileQueueEventJournal.java`, `TenantJournalWriter.java`, `JournalStateStore.java`, `JournalScanner.java`, `JournalReadBatch.java`
 - Test: `internal/journal/FileQueueEventJournalTest.java`, `JournalCrashRecoveryTest.java`
 
 **Interfaces:** Implements `QueueEventJournal.append`, `appendBatch`, `readBatch`, `tailOffset`, `baseOffset`, `tenantIds`, `compact` and `flush`.
 
-- [ ] Write tests for strict per-tenant ordering, cross-tenant parallelism, DURABLE/BALANCED/ASYNC acknowledgment, bounded queue rejection and graceful drain.
-- [ ] Write corrupt-tail tests for partial frame, bad final CRC, middle corruption, state loss and sequence gap.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement one bounded writer per active tenant, micro-batching, idle close, state debounce, file locking and safe tail truncation.
-- [ ] Verify middle corruption/sequence conflict isolates the tenant and never auto-skips.
-- [ ] Commit: `✨ feat(journal): add durable tenant event logs`
+- [x] Write tests for strict per-tenant ordering, cross-tenant parallelism, DURABLE/BALANCED/ASYNC acknowledgment, bounded queue rejection and graceful drain.
+- [x] Write corrupt-tail tests for partial frame, bad final CRC, middle corruption, state loss and sequence gap.
+- [x] Run focused tests; expect failure.
+- [x] Implement one bounded writer per active tenant, micro-batching, idle close, state debounce, file locking and safe tail truncation.
+- [x] Verify middle corruption/sequence conflict isolates the tenant and never auto-skips.
+- [x] Commit: `✨ feat(journal): add durable tenant event logs` (`7ef7cf6`)
 
 ### Task 9: Metadata projection, reducer, and active cache
 
