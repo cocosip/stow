@@ -224,13 +224,6 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             }
             tenant.baseOffset = throughOffset;
             tenant.records = new ArrayList<>(kept);
-            for (int i = 0; i < tenant.records.size(); i++) {
-                JournalScanner.Record record = tenant.records.get(i);
-                tenant.records.set(
-                        i,
-                        new JournalScanner.Record(
-                                record.offset() - throughOffset, record.nextOffset() - throughOffset, record.event()));
-            }
             tenant.tailOffset = tenant.baseOffset + FilesSize(log);
             persistState(tenant, false, -1);
         }

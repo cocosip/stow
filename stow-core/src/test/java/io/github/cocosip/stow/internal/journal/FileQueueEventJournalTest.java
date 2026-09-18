@@ -119,6 +119,9 @@ class FileQueueEventJournalTest {
             firstEnd = journal.readBatch("tenant-a", 0, 1).nextOffset();
             journal.compact("tenant-a", firstEnd);
             assertThat(journal.baseOffset("tenant-a")).isEqualTo(firstEnd);
+            assertThat(journal.readBatch("tenant-a", firstEnd, 10).events())
+                    .extracting(QueueEventRecord::sequenceNumber)
+                    .containsExactly(2L, 3L);
         }
         try (FileQueueEventJournal journal =
                 new FileQueueEventJournal(root, configuration, new BinaryV1JournalCodec())) {
