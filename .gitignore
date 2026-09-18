@@ -38,6 +38,7 @@ docs/superpowers/
 
 # Maven and Java IDE output
 target/
+.flattened-pom.xml
 .classpath
 .project
 .settings/

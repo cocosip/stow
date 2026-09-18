@@ -4,7 +4,7 @@
 
   <groupId>io.github.cocosip</groupId>
   <artifactId>stow-parent</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>${revision}</version>
   <packaging>pom</packaging>
 
   <name>Stow</name>
@@ -28,6 +28,7 @@
   </modules>
 
   <properties>
+    <revision>0.1.0-SNAPSHOT</revision>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <maven.compiler.release>21</maven.compiler.release>
@@ -52,6 +53,7 @@
     <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
     <spotbugs-maven-plugin.version>4.9.8.1</spotbugs-maven-plugin.version>
     <spotless-maven-plugin.version>2.46.1</spotless-maven-plugin.version>
+    <flatten-maven-plugin.version>1.7.3</flatten-maven-plugin.version>
   </properties>
 
   <dependencyManagement>
@@ -176,6 +178,11 @@
           <groupId>com.github.spotbugs</groupId>
           <artifactId>spotbugs-maven-plugin</artifactId>
           <version>${spotbugs-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>flatten-maven-plugin</artifactId>
+          <version>${flatten-maven-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.eclipse.m2e</groupId>
@@ -306,6 +313,30 @@
               <goal>check</goal>
             </goals>
             <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>flatten-maven-plugin</artifactId>
+        <configuration>
+          <flattenMode>resolveCiFriendliesOnly</flattenMode>
+          <updatePomFile>true</updatePomFile>
+        </configuration>
+        <executions>
+          <execution>
+            <id>flatten</id>
+            <goals>
+              <goal>flatten</goal>
+            </goals>
+            <phase>process-resources</phase>
+          </execution>
+          <execution>
+            <id>flatten-clean</id>
+            <goals>
+              <goal>clean</goal>
+            </goals>
+            <phase>clean</phase>
           </execution>
         </executions>
       </plugin>

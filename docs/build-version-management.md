@@ -29,7 +29,9 @@ Stow 的 Maven reactor 使用一个项目版本和一组集中管理的依赖、
 
 该配置由根 POM 统一继承。samples 与 benchmarks 仍设置
 `maven.deploy.skip=true`，正式发布物保持为 `stow-core` 和
-`stow-spring-boot-starter` 两个 JAR。
+`stow-spring-boot-starter` 两个 JAR。扁平 POM 会将 `${revision}` 解析为具体
+版本；reactor 依赖保留 `${project.version}`，由带有具体父版本的消费端模型解析为
+相同的正式版本。
 
 ## 依赖与插件版本
 
