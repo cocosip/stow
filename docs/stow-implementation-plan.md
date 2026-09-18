@@ -126,6 +126,8 @@ benchmarks/**
 
 ### Task 5: Local file-system volumes and selection
 
+**Status (2026-09-18):** Complete. Final independent review approved after commits `c33863d`, `5fe89f2` and `12c468c`; `stow-core clean verify` passed with 115 tests, 0 failures, 5 environment-dependent skips, clean Spotless and 0 SpotBugs findings.
+
 **Files:**
 - Create: `internal/filesystem/PathPolicy.java`, `FileKeyGenerator.java`, `LocalFileSystemVolume.java`, `DefaultStorageVolumeProvider.java`, `VolumeRegistry.java`, `PowerOfTwoVolumeSelector.java`
 - Test: `internal/filesystem/PathPolicyTest.java`, `LocalFileSystemVolumeTest.java`, `PowerOfTwoVolumeSelectorTest.java`
@@ -137,7 +139,8 @@ benchmarks/**
 - [x] Run focused tests; expect failure.
 - [x] Implement file keys as 32 lowercase hex characters, same-directory temp writes, optional `FileChannel.force(true)`, atomic move and cached health/capacity.
 - [x] Run focused tests on real temporary directories; expect pass.
-- [x] Commit: `✨ feat(filesystem): add durable multi-volume storage`
+- [x] Commit: `✨ feat(filesystem): add durable multi-volume storage` (`c33863d`), with path-confinement hardening in `5fe89f2` and cross-provider regression coverage in `12c468c`.
+- [x] Complete independent review; result: `Spec compliance: PASS`, `Quality: APPROVED`.
 
 ### Task 6: Tenant and directory quota reservations
 
