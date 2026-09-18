@@ -1,6 +1,6 @@
 package io.github.cocosip.stow.internal.scheduler;
 
-import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.cocosip.stow.api.ContentSources;
@@ -32,6 +32,10 @@ import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 
 class LeaseRaceTest {
@@ -71,14 +75,29 @@ class LeaseRaceTest {
             fixture.pool.write(fixture.tenant, ContentSources.of(new byte[] {1}), null);
             ProcessingLease lease =
                     fixture.pool.claimNext(fixture.tenant).orElseThrow().lease();
-            Thread complete = new Thread(() -> fixture.pool.complete(lease));
-            Thread fail = new Thread(() -> fixture.pool.fail(lease, "race"));
-            complete.start();
-            fail.start();
-            complete.join();
-            fail.join();
-            assertThatCode(() -> fixture.pool.status(fixture.tenant, lease.fileKey()))
-                    .doesNotThrowAnyException();
+            ExecutorService executor = Executors.newFixedThreadPool(2);
+            try {
+                Future<?> complete = executor.submit(() -> fixture.pool.complete(lease));
+                Future<?> fail = executor.submit(() -> fixture.pool.fail(lease, "race"));
+                int successes = 0;
+                int mismatches = 0;
+                for (Future<?> outcome : new Future<?>[] {complete, fail}) {
+                    try {
+                        outcome.get();
+                        successes++;
+                    } catch (ExecutionException exception) {
+                        if (exception.getCause() instanceof LeaseMismatchException) {
+                            mismatches++;
+                        } else {
+                            throw exception;
+                        }
+                    }
+                }
+                assertThat(successes).isEqualTo(1);
+                assertThat(mismatches).isEqualTo(1);
+            } finally {
+                executor.shutdownNow();
+            }
         }
     }
 
