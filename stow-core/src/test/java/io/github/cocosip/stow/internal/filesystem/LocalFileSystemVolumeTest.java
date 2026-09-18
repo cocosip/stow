@@ -10,9 +10,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -124,9 +126,14 @@ class LocalFileSystemVolumeTest {
         ReplacingParentInputStream content = new ReplacingParentInputStream(
                 target, displacedParent, outside, "content".getBytes(StandardCharsets.UTF_8));
 
-        assertThat(volume.write(target, content)).isEqualTo(7);
-
-        assertThat(displacedParent.resolve(target.getFileName())).hasContent("content");
+        if (supportsSecureDirectoryStreams(mount)) {
+            assertThat(volume.write(target, content)).isEqualTo(7);
+            assertThat(displacedParent.resolve(target.getFileName())).hasContent("content");
+        } else {
+            assertThatThrownBy(() -> volume.write(target, content))
+                    .isInstanceOf(StorageVolumeUnavailableException.class);
+            assertThat(displacedParent.resolve(target.getFileName())).doesNotExist();
+        }
         assertThat(outside.resolve(target.getFileName())).doesNotExist();
     }
 
@@ -228,6 +235,12 @@ class LocalFileSystemVolumeTest {
 
     private static boolean isWindows() {
         return System.getProperty("os.name").startsWith("Windows");
+    }
+
+    private static boolean supportsSecureDirectoryStreams(Path directory) throws IOException {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory)) {
+            return stream instanceof SecureDirectoryStream<?>;
+        }
     }
 
     private static boolean isMissingWindowsSymbolicLinkPrivilege(FileSystemException exception) {
