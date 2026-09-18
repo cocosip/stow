@@ -152,6 +152,42 @@ class DefaultStowRuntimeTest {
     }
 
     @Test
+    void exposesQuotaManagersAndPreservesTenantCreationDefaultAcrossReopen() {
+        Path root = temporaryDirectory.resolve("quota-runtime");
+        StowConfiguration original = StowConfiguration.builder()
+                .metadataDirectory(root.resolve("metadata"))
+                .quotaDirectory(root.resolve("quota"))
+                .queueDirectory(root.resolve("queue"))
+                .watcherDirectory(root.resolve("watchers"))
+                .defaultQuota(42)
+                .preconfiguredTenants(List.of("configured-tenant"))
+                .build();
+        try (StowRuntime runtime = Stow.open(original)) {
+            assertThat(runtime.tenantQuotaManager().limit("configured-tenant")).isEqualTo(42);
+            runtime.directoryQuotaManager().setLimit("configured-tenant", "incoming", 7);
+            assertThat(runtime.directoryQuotaManager()
+                            .get("configured-tenant", "/incoming")
+                            .maxFiles())
+                    .isEqualTo(7);
+        }
+
+        StowConfiguration changedDefault = StowConfiguration.builder()
+                .metadataDirectory(root.resolve("metadata"))
+                .quotaDirectory(root.resolve("quota"))
+                .queueDirectory(root.resolve("queue"))
+                .watcherDirectory(root.resolve("watchers"))
+                .defaultQuota(999)
+                .build();
+        try (StowRuntime reopened = Stow.open(changedDefault)) {
+            assertThat(reopened.tenantQuotaManager().limit("configured-tenant")).isEqualTo(42);
+            assertThat(reopened.directoryQuotaManager()
+                            .get("configured-tenant", "incoming")
+                            .maxFiles())
+                    .isEqualTo(7);
+        }
+    }
+
+    @Test
     void closesStartedManagedServicesInReverseOrder() {
         List<String> closed = new ArrayList<>();
         List<ManagedBackgroundService> services = List.of(

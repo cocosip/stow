@@ -80,6 +80,15 @@ public final class DefaultTenantManager implements TenantManager {
                 .toContext();
     }
 
+    public long quotaLimit(String tenantId) {
+        get(tenantId);
+        return repository.read().tenants().stream()
+                .filter(tenant -> tenant.tenantId().equals(tenantId))
+                .findFirst()
+                .orElseThrow()
+                .maxFiles();
+    }
+
     @Override
     public void enable(String tenantId) {
         updateStatus(tenantId, TenantStatus.ENABLED);

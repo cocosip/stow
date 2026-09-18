@@ -148,14 +148,14 @@ benchmarks/**
 - Create: `internal/quota/SqliteQuotaRepository.java`, `QuotaReservation.java`, `DefaultTenantQuotaManager.java`, `DefaultDirectoryQuotaManager.java`
 - Test: `internal/quota/SqliteQuotaRepositoryTest.java`, `QuotaConcurrencyTest.java`
 
-**Interfaces:** Produces atomic `reserve(fileKey, directory)`, `consume(eventId, reservationId)`, `rollback(reservationId)`, `release(eventId, fileKey)` and public quota managers.
+**Interfaces:** Produces atomic `reserve(fileKey, directory)`, `consume(eventId, sequenceNumber, reservationId)`, `rollback(reservationId)`, `release(eventId, sequenceNumber, fileKey, logicalDirectory)` and public quota managers. Event methods persist the real journal sequence, and release receives the normalized logical directory because a consumed reservation no longer exists to supply it.
 
-- [ ] Create schema tests matching the exact `tenant_quota`, `directory_quotas`, `quota_reservations` and `applied_quota_events` DDL in the persistence contract.
-- [ ] Write concurrent boundary tests where N writers compete for one remaining slot; assert exactly one reservation succeeds.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement optimistic row-version transactions, logical-directory normalization, unlimited zero limits and idempotent consume/rollback/release.
-- [ ] Add crash-style reopen tests proving reservations survive and can be reconciled.
-- [ ] Commit: `✨ feat(quota): add durable atomic reservations`
+- [x] Create schema tests matching the exact `tenant_quota`, `directory_quotas`, `quota_reservations` and `applied_quota_events` DDL in the persistence contract.
+- [x] Write concurrent boundary tests where N writers compete for one remaining slot; assert exactly one reservation succeeds.
+- [x] Run focused tests; expect failure.
+- [x] Implement optimistic row-version transactions, logical-directory normalization, unlimited zero limits and idempotent consume/rollback/release.
+- [x] Add crash-style reopen tests proving reservations survive and can be reconciled.
+- [x] Commit: `✨ feat(quota): add durable atomic reservations`
 
 ### Task 7: Journal codecs and format detection
 

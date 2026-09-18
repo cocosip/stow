@@ -14,6 +14,9 @@ import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.api.TenantQuotaManager;
 import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
+import io.github.cocosip.stow.internal.quota.DefaultDirectoryQuotaManager;
+import io.github.cocosip.stow.internal.quota.DefaultTenantQuotaManager;
+import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
 import io.github.cocosip.stow.internal.tenant.DefaultTenantManager;
 import io.github.cocosip.stow.internal.tenant.JsonTenantRepository;
 import io.github.cocosip.stow.model.ComponentHealth;
@@ -48,6 +51,7 @@ public final class DefaultStowRuntime implements StowRuntime {
     private ExecutorService workerExecutor;
     private ScheduledExecutorService scheduler;
     private TenantManager tenantManager;
+    private SqliteQuotaRepository quotaRepository;
 
     DefaultStowRuntime(
             StowConfiguration configuration,
@@ -90,6 +94,7 @@ public final class DefaultStowRuntime implements StowRuntime {
             ownedResources.push(RuntimeDirectoryLock.acquire(configuration.paths()));
             initializeExecutors();
             initializeTenantManager();
+            initializeQuotaManagers();
             for (ManagedBackgroundService service : backgroundServices) {
                 ownedResources.push(service);
                 service.start();
@@ -132,12 +137,14 @@ public final class DefaultStowRuntime implements StowRuntime {
 
     @Override
     public TenantQuotaManager tenantQuotaManager() {
-        return unavailableService("TenantQuotaManager");
+        ensureRunning();
+        return new DefaultTenantQuotaManager(quotaRepository);
     }
 
     @Override
     public DirectoryQuotaManager directoryQuotaManager() {
-        return unavailableService("DirectoryQuotaManager");
+        ensureRunning();
+        return new DefaultDirectoryQuotaManager(quotaRepository);
     }
 
     @Override
@@ -227,6 +234,12 @@ public final class DefaultStowRuntime implements StowRuntime {
                 tenantConfiguration.autoCreateTenants(),
                 tenantConfiguration.defaultQuota());
         tenantConfiguration.preconfiguredTenants().forEach(tenantManager::create);
+    }
+
+    private void initializeQuotaManagers() {
+        DefaultTenantManager tenants = (DefaultTenantManager) tenantManager;
+        quotaRepository = new SqliteQuotaRepository(
+                configuration.paths().quotaDirectory(), configuration.sqlite(), clock, tenants::quotaLimit);
     }
 
     private RuntimeException closeOwnedResources() {
