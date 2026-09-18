@@ -84,12 +84,12 @@ benchmarks/**
 - Produces the exact public signatures in `docs/stow-api-contract.md`.
 - Produces `StowConfiguration.builder().build()`, immutable records, enums, `StowException#errorCode()` and SPI contracts.
 
-- [ ] Write parameterized configuration tests for every default-value row and invalid zero/negative/range/path combination.
-- [ ] Write model tests proving defensive collection copies, required field validation, 4096-character error truncation and 255/32-character filename/extension limits.
-- [ ] Run `mvnw -pl stow-core test -Dtest=StowConfigurationTest,PublicModelTest`; expect compilation failure for missing types.
-- [ ] Implement public records, enums, interfaces and exceptions exactly as the API contract; use compact constructors and immutable copies.
-- [ ] Run the focused tests, then `mvnw -pl stow-core test`; expect pass.
-- [ ] Commit: `✨ feat(core): define public API and configuration contracts`
+- [x] Write parameterized configuration tests for every default-value row and invalid zero/negative/range/path combination.
+- [x] Write model tests proving defensive collection copies, required field validation, 4096-character error truncation and 255/32-character filename/extension limits.
+- [x] Run `mvnw -pl stow-core test -Dtest=StowConfigurationTest,PublicModelTest`; expect compilation failure for missing types.
+- [x] Implement public records, enums, interfaces and exceptions exactly as the API contract; use compact constructors and immutable copies.
+- [x] Run the focused tests, then `mvnw -pl stow-core test`; expect pass.
+- [x] Commit: `✨ feat(core): define public API and configuration contracts`
 
 ### Task 3: Runtime lifecycle and composition root
 

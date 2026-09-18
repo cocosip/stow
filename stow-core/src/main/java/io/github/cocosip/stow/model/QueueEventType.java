@@ -1,0 +1,12 @@
+package io.github.cocosip.stow.model;
+
+public enum QueueEventType {
+    ACCEPTED,
+    PROCESSING_STARTED,
+    PROCESSING_FAILED,
+    PROCESSING_COMPLETED,
+    DELETE_REQUESTED,
+    DELETE_SUCCEEDED,
+    PROCESSING_TIMED_OUT,
+    DEAD_LETTERED
+}
