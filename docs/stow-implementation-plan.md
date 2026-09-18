@@ -236,12 +236,12 @@ benchmarks/**
 
 **Interfaces:** Completes StoragePool claimNext/claimBatch/complete/fail/status using UUID leases and event transitions.
 
-- [ ] Write tests for unique single/batch claims, availableAt filtering, exponential cap, permanent failure and empty queue.
-- [ ] Write race tests for duplicate complete, complete-vs-fail, stale lease, cross-tenant lease, released same lease and different lease.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement conditional SQLite claim, per-file striped serialization and rollback when journal append fails.
-- [ ] Add timeout tests proving old lease invalidation and PROCESSING_TIMED_OUT replay.
-- [ ] Commit: `✨ feat(scheduler): enforce lease-safe queue processing`
+- [x] Write tests for unique single/batch claims, availableAt filtering, exponential cap, permanent failure and empty queue.
+- [x] Write race tests for duplicate complete, complete-vs-fail, stale lease, cross-tenant lease, released same lease and different lease.
+- [x] Run focused tests; expect failure.
+- [x] Implement conditional SQLite claim, per-file striped serialization and rollback when journal append fails.
+- [x] Add timeout tests proving old lease invalidation and PROCESSING_TIMED_OUT replay.
+- [x] Commit: `✨ feat(scheduler): enforce lease-safe queue processing` (`57b36aa`); race assertion fix (`9e0fb94`)
 
 ### Task 12: Snapshot, compaction, rebuild, and database recovery
 
