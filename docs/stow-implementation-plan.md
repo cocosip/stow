@@ -116,12 +116,12 @@ benchmarks/**
 
 **Interfaces:** Produces safe PRAGMA setup, schema version checks, atomic JSON persistence and the public `TenantManager`.
 
-- [ ] Write tests for PRAGMA whitelist, per-tenant path isolation, atomic JSON replacement, auto-create off/on, enable/disable persistence and concurrent create idempotency.
-- [ ] Run focused tests; expect missing-class failure.
-- [ ] Implement direct JDBC connections with WAL/NORMAL defaults and `PRAGMA user_version`; implement `tenants.json` under an exclusive repository lock.
-- [ ] Inject an I/O failure between temp-file force and move; prove the old tenant document remains readable.
-- [ ] Run focused tests and `mvnw -pl stow-core test`; expect pass.
-- [ ] Commit: `✨ feat(tenant): persist isolated tenant lifecycle`
+- [x] Write tests for PRAGMA whitelist, per-tenant path isolation, atomic JSON replacement, auto-create off/on, enable/disable persistence and concurrent create idempotency.
+- [x] Run focused tests; expect missing-class failure.
+- [x] Implement direct JDBC connections with WAL/NORMAL defaults and `PRAGMA user_version`; implement `tenants.json` under an exclusive repository lock.
+- [x] Inject an I/O failure between temp-file force and move; prove the old tenant document remains readable.
+- [x] Run focused tests and `mvnw -pl stow-core test`; expect pass.
+- [x] Commit: `✨ feat(tenant): persist isolated tenant lifecycle`
 
 ### Task 5: Local file-system volumes and selection
 

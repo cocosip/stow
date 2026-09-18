@@ -14,6 +14,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -123,6 +125,29 @@ class DefaultStowRuntimeTest {
         } finally {
             worker.shutdownNow();
             scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void exposesTenantManagerAndCreatesConfiguredTenantsAtStart() {
+        StowRuntime runtime = Stow.builder()
+                .configuration(StowConfiguration.builder()
+                        .metadataDirectory(temporaryDirectory.resolve("tenant-runtime/metadata"))
+                        .quotaDirectory(temporaryDirectory.resolve("tenant-runtime/quota"))
+                        .queueDirectory(temporaryDirectory.resolve("tenant-runtime/queue"))
+                        .watcherDirectory(temporaryDirectory.resolve("tenant-runtime/watchers"))
+                        .defaultQuota(42)
+                        .preconfiguredTenants(List.of("configured-tenant"))
+                        .build())
+                .clock(Clock.fixed(Instant.parse("2026-09-18T00:00:00Z"), ZoneOffset.UTC))
+                .build();
+        try {
+            runtime.start();
+
+            assertThat(runtime.tenantManager().get("configured-tenant").tenantId())
+                    .isEqualTo("configured-tenant");
+        } finally {
+            runtime.close();
         }
     }
 

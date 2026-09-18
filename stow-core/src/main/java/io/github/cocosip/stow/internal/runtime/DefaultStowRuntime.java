@@ -14,6 +14,8 @@ import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.api.TenantQuotaManager;
 import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
+import io.github.cocosip.stow.internal.tenant.DefaultTenantManager;
+import io.github.cocosip.stow.internal.tenant.JsonTenantRepository;
 import io.github.cocosip.stow.model.ComponentHealth;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.RuntimeHealth;
@@ -45,6 +47,7 @@ public final class DefaultStowRuntime implements StowRuntime {
 
     private ExecutorService workerExecutor;
     private ScheduledExecutorService scheduler;
+    private TenantManager tenantManager;
 
     DefaultStowRuntime(
             StowConfiguration configuration,
@@ -86,6 +89,7 @@ public final class DefaultStowRuntime implements StowRuntime {
         try {
             ownedResources.push(RuntimeDirectoryLock.acquire(configuration.paths()));
             initializeExecutors();
+            initializeTenantManager();
             for (ManagedBackgroundService service : backgroundServices) {
                 ownedResources.push(service);
                 service.start();
@@ -122,7 +126,8 @@ public final class DefaultStowRuntime implements StowRuntime {
 
     @Override
     public TenantManager tenantManager() {
-        return unavailableService("TenantManager");
+        ensureRunning();
+        return tenantManager;
     }
 
     @Override
@@ -212,6 +217,16 @@ public final class DefaultStowRuntime implements StowRuntime {
         } else {
             scheduler = suppliedScheduler;
         }
+    }
+
+    private void initializeTenantManager() {
+        var tenantConfiguration = configuration.tenant();
+        tenantManager = new DefaultTenantManager(
+                new JsonTenantRepository(configuration.paths().metadataDirectory()),
+                clock,
+                tenantConfiguration.autoCreateTenants(),
+                tenantConfiguration.defaultQuota());
+        tenantConfiguration.preconfiguredTenants().forEach(tenantManager::create);
     }
 
     private RuntimeException closeOwnedResources() {
