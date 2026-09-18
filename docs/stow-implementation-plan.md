@@ -196,18 +196,20 @@ benchmarks/**
 
 ### Task 9: Metadata projection, reducer, and active cache
 
+**Status (2026-09-18):** Complete. Metadata schema, legal event reducer transitions, independent quota/idempotency application, cursor persistence, active cache, and projection service committed in `039c03d`; focused and `stow-core` tests pass.
+
 **Files:**
 - Create: `internal/projection/QueueEventReducer.java`, `SqliteMetadataProjectionStore.java`, `ActiveFileCache.java`, `ProjectionCursorStore.java`, `QueueProjectionService.java`
 - Test: `internal/projection/QueueEventReducerTest.java`, `QueueProjectionServiceTest.java`, `ProjectionIdempotencyTest.java`
 
 **Interfaces:** Consumes journal batches and quota reservations; produces metadata schema, active rows, applied-events idempotency and cursor progress.
 
-- [ ] Write a transition matrix test covering every row in persistence contract section 11 plus every illegal predecessor.
-- [ ] Write replay tests for duplicate event ID, sequence collision, metadata commit before quota, quota commit before cursor, batch rollback and first-access cache load.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement schema version 1 exactly, idempotent two-database reducer application, both applied-events tables and cursor-after-both-commits ordering.
-- [ ] Run focused tests with real SQLite; expect pass and deterministic tenant isolation.
-- [ ] Commit: `✨ feat(projection): build replayable SQLite state`
+- [x] Write a transition matrix test covering every row in persistence contract section 11 plus every illegal predecessor.
+- [x] Write replay tests for duplicate event ID, sequence collision, metadata commit before quota, quota commit before cursor, batch rollback and first-access cache load.
+- [x] Run focused tests; expect failure.
+- [x] Implement schema version 1 exactly, idempotent two-database reducer application, both applied-events tables and cursor-after-both-commits ordering.
+- [x] Run focused tests with real SQLite; expect pass and deterministic tenant isolation.
+- [x] Commit: `✨ feat(projection): build replayable SQLite state` (`039c03d`)
 
 ### Task 10: Storage write/read pipeline
 
