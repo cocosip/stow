@@ -13,9 +13,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 
 public final class SqliteMetadataProjectionStore {
@@ -128,6 +130,113 @@ public final class SqliteMetadataProjectionStore {
         });
     }
 
+    /** Atomically claims currently available rows. The returned previous state enables compensation. */
+    public List<ClaimedRow> claimAvailable(String tenantId, int limit, Instant now) {
+        if (limit <= 0) throw new IllegalArgumentException("limit must be positive");
+        if (now == null) throw new IllegalArgumentException("now must not be null");
+        long nowMillis = now.toEpochMilli();
+        return write(tenantId, connection -> {
+            List<ClaimedRow> claimed = new ArrayList<>();
+            try (PreparedStatement select = connection.prepareStatement(
+                    """
+                    SELECT * FROM files
+                    WHERE tenant_id=?
+                      AND status IN (?, ?)
+                      AND (available_at_ms IS NULL OR available_at_ms <= ?)
+                    ORDER BY created_at_ms, file_key
+                    LIMIT ?
+                    """)) {
+                select.setString(1, tenantId);
+                select.setInt(2, FileProcessingStatus.PENDING.ordinal());
+                select.setInt(3, FileProcessingStatus.FAILED.ordinal());
+                select.setLong(4, nowMillis);
+                select.setInt(5, limit);
+                try (ResultSet result = select.executeQuery()) {
+                    while (result.next()) {
+                        FileRow before = readRow(result);
+                        FileProcessingStatus previousStatus = before.status();
+                        Long previousAvailableAt = before.availableAtMillis();
+                        UUID leaseId = UUID.randomUUID();
+                        try (PreparedStatement update = connection.prepareStatement(
+                                """
+                                UPDATE files
+                                SET status=?, lease_id=?, processing_started_at_ms=?, available_at_ms=NULL,
+                                    row_version=row_version+1
+                                WHERE tenant_id=? AND file_key=?
+                                  AND status IN (?, ?)
+                                  AND (available_at_ms IS NULL OR available_at_ms <= ?)
+                                """)) {
+                            update.setInt(1, FileProcessingStatus.PROCESSING.ordinal());
+                            update.setString(2, leaseId.toString());
+                            update.setLong(3, nowMillis);
+                            update.setString(4, tenantId);
+                            update.setString(5, before.fileKey());
+                            update.setInt(6, FileProcessingStatus.PENDING.ordinal());
+                            update.setInt(7, FileProcessingStatus.FAILED.ordinal());
+                            update.setLong(8, nowMillis);
+                            if (update.executeUpdate() != 1) continue;
+                        }
+                        claimed.add(new ClaimedRow(
+                                find(connection, before.fileKey()).orElseThrow(), previousStatus, previousAvailableAt));
+                    }
+                }
+            }
+            return List.copyOf(claimed);
+        });
+    }
+
+    public List<FileRow> processingBefore(String tenantId, Instant cutoff, int limit) {
+        if (cutoff == null) throw new IllegalArgumentException("cutoff must not be null");
+        if (limit <= 0) throw new IllegalArgumentException("limit must be positive");
+        return read(tenantId, connection -> {
+            List<FileRow> rows = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    """
+                    SELECT * FROM files
+                    WHERE tenant_id=? AND status=? AND processing_started_at_ms IS NOT NULL
+                      AND processing_started_at_ms <= ?
+                    ORDER BY processing_started_at_ms, file_key
+                    LIMIT ?
+                    """)) {
+                statement.setString(1, tenantId);
+                statement.setInt(2, FileProcessingStatus.PROCESSING.ordinal());
+                statement.setLong(3, cutoff.toEpochMilli());
+                statement.setInt(4, limit);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) rows.add(readRow(result));
+                }
+            }
+            return List.copyOf(rows);
+        });
+    }
+
+    /** Compensates a pre-committed claim when its journal event cannot be admitted. */
+    public boolean rollbackClaim(
+            String tenantId,
+            String fileKey,
+            UUID leaseId,
+            FileProcessingStatus previousStatus,
+            Long previousAvailableAtMillis) {
+        return write(tenantId, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    """
+                    UPDATE files
+                    SET status=?, lease_id=NULL, processing_started_at_ms=NULL, available_at_ms=?,
+                        row_version=row_version+1
+                    WHERE tenant_id=? AND file_key=? AND status=? AND lease_id=?
+                    """)) {
+                statement.setInt(1, previousStatus.ordinal());
+                if (previousAvailableAtMillis == null) statement.setObject(2, null);
+                else statement.setLong(2, previousAvailableAtMillis);
+                statement.setString(3, tenantId);
+                statement.setString(4, fileKey);
+                statement.setInt(5, FileProcessingStatus.PROCESSING.ordinal());
+                statement.setString(6, leaseId.toString());
+                return statement.executeUpdate() == 1;
+            }
+        });
+    }
+
     public List<FileRow> activeFiles(String tenantId) {
         return read(tenantId, connection -> {
             List<FileRow> rows = new ArrayList<>();
@@ -214,6 +323,8 @@ public final class SqliteMetadataProjectionStore {
             long lastEventSequence,
             long rowVersion) {}
 
+    public record ClaimedRow(FileRow row, FileProcessingStatus previousStatus, Long previousAvailableAtMillis) {}
+
     static FileRow readRow(ResultSet result) throws SQLException {
         return new FileRow(
                 result.getString("file_key"),
@@ -243,6 +354,15 @@ public final class SqliteMetadataProjectionStore {
     private static Long nullable(ResultSet result, String name) throws SQLException {
         long value = result.getLong(name);
         return result.wasNull() ? null : value;
+    }
+
+    private static Optional<FileRow> find(Connection connection, String fileKey) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM files WHERE file_key=?")) {
+            statement.setString(1, fileKey);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(readRow(result)) : Optional.empty();
+            }
+        }
     }
 
     private static ReentrantLock[] createLocks() {

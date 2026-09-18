@@ -95,9 +95,21 @@ public final class QueueEventReducer {
     private static void processingStarted(
             Connection c, QueueEventRecord e, Optional<SqliteMetadataProjectionStore.FileRow> row) throws SQLException {
         SqliteMetadataProjectionStore.FileRow current = require(row, "PROCESSING_STARTED");
-        requireStatus(current, FileProcessingStatus.PENDING, FileProcessingStatus.FAILED);
         if (e.status() != FileProcessingStatus.PROCESSING || e.leaseId() == null)
             throw conflict("PROCESSING_STARTED requires processing status and leaseId");
+        // A scheduler conditionally claims the row before appending the journal event. Replay of
+        // that event must acknowledge the already-applied lease transition rather than applying it twice.
+        if (current.status() == FileProcessingStatus.PROCESSING
+                && e.leaseId().toString().equals(current.leaseId())) {
+            update(
+                    c,
+                    e,
+                    "UPDATE files SET last_event_sequence=?, row_version=row_version+1 WHERE file_key=?",
+                    e.sequenceNumber(),
+                    e.fileKey());
+            return;
+        }
+        requireStatus(current, FileProcessingStatus.PENDING, FileProcessingStatus.FAILED);
         update(
                 c,
                 e,

@@ -3,7 +3,9 @@ package io.github.cocosip.stow.internal.scheduler;
 import io.github.cocosip.stow.api.ContentSource;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
+import io.github.cocosip.stow.config.RetryConfiguration;
 import io.github.cocosip.stow.exception.InsufficientStorageException;
+import io.github.cocosip.stow.exception.LeaseMismatchException;
 import io.github.cocosip.stow.exception.PhysicalFileMissingException;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
 import io.github.cocosip.stow.exception.StoredFileNotFoundException;
@@ -28,12 +30,15 @@ import java.io.InputStream;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -53,6 +58,10 @@ public final class DefaultStoragePool implements StoragePool {
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
     private final Map<String, AtomicLong> sequences = new ConcurrentHashMap<>();
+    private final Map<String, Object> sequenceLocks = new ConcurrentHashMap<>();
+    private final StripedFileLock fileLocks = new StripedFileLock();
+    private final Map<String, LeaseOutcome> releasedLeases = new ConcurrentHashMap<>();
+    private final RetryDelayCalculator retryDelays;
 
     public DefaultStoragePool(
             TenantLookup tenants,
@@ -62,7 +71,7 @@ public final class DefaultStoragePool implements StoragePool {
             QueueEventJournal journal,
             StorageVolume volume,
             Clock clock) {
-        this(tenants, quota, metadata, projection, journal, List.of(volume), clock);
+        this(tenants, quota, metadata, projection, journal, List.of(volume), clock, defaultRetryConfiguration());
     }
 
     public DefaultStoragePool(
@@ -84,6 +93,18 @@ public final class DefaultStoragePool implements StoragePool {
             QueueEventJournal journal,
             List<StorageVolume> volumes,
             Clock clock) {
+        this(tenants, quota, metadata, projection, journal, volumes, clock, defaultRetryConfiguration());
+    }
+
+    public DefaultStoragePool(
+            TenantLookup tenants,
+            SqliteQuotaRepository quota,
+            SqliteMetadataProjectionStore metadata,
+            QueueProjectionService projection,
+            QueueEventJournal journal,
+            List<StorageVolume> volumes,
+            Clock clock,
+            RetryConfiguration retryConfiguration) {
         this.tenants = Objects.requireNonNull(tenants, "tenants");
         this.quota = Objects.requireNonNull(quota, "quota");
         this.metadata = Objects.requireNonNull(metadata, "metadata");
@@ -92,6 +113,19 @@ public final class DefaultStoragePool implements StoragePool {
         this.volumes = List.copyOf(volumes);
         if (this.volumes.isEmpty()) throw new IllegalArgumentException("volumes must not be empty");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.retryDelays = new RetryDelayCalculator(Objects.requireNonNull(retryConfiguration, "retryConfiguration"));
+    }
+
+    public DefaultStoragePool(
+            TenantLookup tenants,
+            SqliteQuotaRepository quota,
+            SqliteMetadataProjectionStore metadata,
+            QueueProjectionService projection,
+            QueueEventJournal journal,
+            StorageVolume volume,
+            Clock clock,
+            RetryConfiguration retryConfiguration) {
+        this(tenants, quota, metadata, projection, journal, List.of(volume), clock, retryConfiguration);
     }
 
     public static TenantLookup tenantManager(io.github.cocosip.stow.api.TenantManager manager) {
@@ -171,30 +205,33 @@ public final class DefaultStoragePool implements StoragePool {
 
         boolean appended = false;
         try {
-            long sequence = nextSequence(tenant.tenantId());
-            QueueEventRecord accepted = new QueueEventRecord(
-                    1,
-                    java.util.UUID.randomUUID(),
-                    tenant.tenantId(),
-                    fileKey,
-                    QueueEventType.ACCEPTED,
-                    clock.instant(),
-                    sequence,
-                    selected.id(),
-                    finalPath,
-                    logicalDirectory,
-                    fileSize,
-                    FileProcessingStatus.PENDING,
-                    null,
-                    null,
-                    0,
-                    null,
-                    null,
-                    options.originalFileName(),
-                    extension);
-            journal.append(accepted);
-            appended = true;
-            projection.projectTenantUntilCaughtUp(tenant.tenantId(), 128);
+            Object sequenceLock = sequenceLocks.computeIfAbsent(tenant.tenantId(), ignored -> new Object());
+            synchronized (sequenceLock) {
+                long sequence = nextSequence(tenant.tenantId());
+                QueueEventRecord accepted = new QueueEventRecord(
+                        1,
+                        java.util.UUID.randomUUID(),
+                        tenant.tenantId(),
+                        fileKey,
+                        QueueEventType.ACCEPTED,
+                        clock.instant(),
+                        sequence,
+                        selected.id(),
+                        finalPath,
+                        logicalDirectory,
+                        fileSize,
+                        FileProcessingStatus.PENDING,
+                        null,
+                        null,
+                        0,
+                        null,
+                        null,
+                        options.originalFileName(),
+                        extension);
+                journal.append(accepted);
+                appended = true;
+                projection.projectTenantUntilCaughtUp(tenant.tenantId(), 128);
+            }
             return fileKey;
         } catch (RuntimeException failure) {
             if (!appended) sequences.get(tenant.tenantId()).decrementAndGet();
@@ -293,22 +330,148 @@ public final class DefaultStoragePool implements StoragePool {
 
     @Override
     public Optional<ClaimedFile> claimNext(TenantContext tenant) {
-        throw unavailable();
+        List<ClaimedFile> claimed = claimBatch(tenant, 1);
+        return claimed.isEmpty() ? Optional.empty() : Optional.of(claimed.get(0));
     }
 
     @Override
     public List<ClaimedFile> claimBatch(TenantContext tenant, int batchSize) {
-        throw unavailable();
+        if (batchSize <= 0) throw new IllegalArgumentException("batchSize must be positive");
+        requireEnabled(tenant);
+        List<SqliteMetadataProjectionStore.ClaimedRow> rows =
+                metadata.claimAvailable(tenant.tenantId(), batchSize, clock.instant());
+        if (rows.isEmpty()) return List.of();
+        List<QueueEventRecord> events = new java.util.ArrayList<>(rows.size());
+        Object sequenceLock = sequenceLocks.computeIfAbsent(tenant.tenantId(), ignored -> new Object());
+        synchronized (sequenceLock) {
+            for (SqliteMetadataProjectionStore.ClaimedRow claimed : rows) {
+                SqliteMetadataProjectionStore.FileRow row = claimed.row();
+                events.add(new QueueEventRecord(
+                        1,
+                        UUID.randomUUID(),
+                        tenant.tenantId(),
+                        row.fileKey(),
+                        QueueEventType.PROCESSING_STARTED,
+                        clock.instant(),
+                        nextSequence(tenant.tenantId()),
+                        row.volumeId(),
+                        Path.of(row.physicalPath()),
+                        row.logicalDirectory(),
+                        row.fileSize(),
+                        FileProcessingStatus.PROCESSING,
+                        UUID.fromString(row.leaseId()),
+                        row.processingStartedAtMillis() == null
+                                ? clock.instant()
+                                : Instant.ofEpochMilli(row.processingStartedAtMillis()),
+                        row.retryCount(),
+                        null,
+                        null,
+                        row.originalFileName(),
+                        row.fileExtension()));
+            }
+            boolean appended = false;
+            try {
+                journal.appendBatch(events);
+                appended = true;
+                projection.projectTenantUntilCaughtUp(tenant.tenantId(), Math.max(128, batchSize));
+            } catch (RuntimeException failure) {
+                if (!appended) {
+                    for (SqliteMetadataProjectionStore.ClaimedRow claimed : rows) {
+                        rollbackClaim(tenant.tenantId(), claimed);
+                    }
+                    sequences.get(tenant.tenantId()).addAndGet(-rows.size());
+                }
+                throw failure;
+            }
+        }
+        return rows.stream().map(claimed -> claimedFile(claimed.row())).toList();
     }
 
     @Override
     public void complete(ProcessingLease lease) {
-        throw unavailable();
+        requireLease(lease);
+        fileLocks.withLock(lease.fileKey(), () -> {
+            String key = leaseKey(lease);
+            LeaseOutcome previous = knownOutcome(lease);
+            Optional<SqliteMetadataProjectionStore.FileRow> found = metadata.find(lease.tenantId(), lease.fileKey());
+            if (found.isEmpty()) throw new LeaseMismatchException("Lease does not own stored file");
+            SqliteMetadataProjectionStore.FileRow row = found.orElseThrow();
+            if (row.status() == FileProcessingStatus.COMPLETED && previous == LeaseOutcome.COMPLETED) return;
+            requireActiveLease(row, lease);
+            QueueEventRecord event = transitionEvent(
+                    row,
+                    lease,
+                    QueueEventType.PROCESSING_COMPLETED,
+                    FileProcessingStatus.COMPLETED,
+                    row.retryCount(),
+                    null,
+                    null);
+            appendTransition(lease.tenantId(), event);
+            releasedLeases.put(key, LeaseOutcome.COMPLETED);
+        });
     }
 
     @Override
     public void fail(ProcessingLease lease, String errorMessage) {
-        throw unavailable();
+        requireLease(lease);
+        fileLocks.withLock(lease.fileKey(), () -> {
+            String key = leaseKey(lease);
+            LeaseOutcome previous = knownOutcome(lease);
+            Optional<SqliteMetadataProjectionStore.FileRow> found = metadata.find(lease.tenantId(), lease.fileKey());
+            if (found.isEmpty()) throw new LeaseMismatchException("Lease does not own stored file");
+            SqliteMetadataProjectionStore.FileRow row = found.orElseThrow();
+            if ((row.status() == FileProcessingStatus.FAILED || row.status() == FileProcessingStatus.PERMANENTLY_FAILED)
+                    && previous == LeaseOutcome.FAILED) return;
+            requireActiveLease(row, lease);
+            int retryCount = Math.addExact(row.retryCount(), 1);
+            boolean permanent = retryDelays.isPermanent(retryCount);
+            Instant failedAt = clock.instant();
+            Instant availableAt = permanent ? null : retryDelays.availableAt(failedAt, retryCount);
+            FileProcessingStatus status =
+                    permanent ? FileProcessingStatus.PERMANENTLY_FAILED : FileProcessingStatus.FAILED;
+            QueueEventRecord event = transitionEvent(
+                    row, lease, QueueEventType.PROCESSING_FAILED, status, retryCount, availableAt, errorMessage);
+            appendTransition(lease.tenantId(), event);
+            releasedLeases.put(key, LeaseOutcome.FAILED);
+        });
+    }
+
+    /** Recovers timed out leases and returns the number of events admitted. */
+    public int recoverTimedOut(Duration timeout) {
+        if (timeout == null || timeout.isNegative()) throw new IllegalArgumentException("timeout must be non-negative");
+        Instant cutoff = clock.instant().minus(timeout);
+        int recovered = 0;
+        for (String tenantId : journal.tenantIds()) {
+            List<SqliteMetadataProjectionStore.FileRow> rows = metadata.processingBefore(tenantId, cutoff, 1_000);
+            for (SqliteMetadataProjectionStore.FileRow row : rows) {
+                final int[] count = {0};
+                fileLocks.withLock(row.fileKey(), () -> {
+                    Optional<SqliteMetadataProjectionStore.FileRow> current = metadata.find(tenantId, row.fileKey());
+                    if (current.isEmpty()
+                            || current.orElseThrow().status() != FileProcessingStatus.PROCESSING
+                            || current.orElseThrow().processingStartedAtMillis() == null
+                            || current.orElseThrow().processingStartedAtMillis() > cutoff.toEpochMilli()) return;
+                    UUID leaseId = UUID.fromString(current.orElseThrow().leaseId());
+                    QueueEventRecord event = transitionEvent(
+                            current.orElseThrow(),
+                            new ProcessingLease(
+                                    tenantId,
+                                    row.fileKey(),
+                                    leaseId,
+                                    Instant.ofEpochMilli(current.orElseThrow().processingStartedAtMillis())),
+                            QueueEventType.PROCESSING_TIMED_OUT,
+                            FileProcessingStatus.PENDING,
+                            current.orElseThrow().retryCount(),
+                            null,
+                            null);
+                    appendTransition(tenantId, event);
+                    releasedLeases.put(leaseKey(tenantId, row.fileKey(), leaseId), LeaseOutcome.TIMED_OUT);
+                    count[0] = 1;
+                });
+                recovered += count[0];
+            }
+        }
+        return recovered;
     }
 
     @Override
@@ -316,6 +479,168 @@ public final class DefaultStoragePool implements StoragePool {
         return findFileInfo(tenant, fileKey)
                 .map(StoredFileInfo::status)
                 .orElseThrow(() -> new StoredFileNotFoundException("Stored file does not exist"));
+    }
+
+    private ClaimedFile claimedFile(SqliteMetadataProjectionStore.FileRow row) {
+        Instant startedAt = row.processingStartedAtMillis() == null
+                ? clock.instant()
+                : Instant.ofEpochMilli(row.processingStartedAtMillis());
+        return new ClaimedFile(
+                toLocation(row),
+                new ProcessingLease(row.tenantId(), row.fileKey(), UUID.fromString(row.leaseId()), startedAt));
+    }
+
+    private FileLocation toLocation(SqliteMetadataProjectionStore.FileRow row) {
+        return new FileLocation(
+                row.fileKey(),
+                row.tenantId(),
+                row.volumeId(),
+                Path.of(row.physicalPath()),
+                row.logicalDirectory(),
+                row.fileSize(),
+                Instant.ofEpochMilli(row.createdAtMillis()),
+                row.status(),
+                row.retryCount(),
+                row.lastFailedAtMillis() == null ? null : Instant.ofEpochMilli(row.lastFailedAtMillis()),
+                row.lastError(),
+                row.availableAtMillis() == null ? null : Instant.ofEpochMilli(row.availableAtMillis()));
+    }
+
+    private void rollbackClaim(String tenantId, SqliteMetadataProjectionStore.ClaimedRow claimed) {
+        SqliteMetadataProjectionStore.FileRow row = claimed.row();
+        metadata.rollbackClaim(
+                tenantId,
+                row.fileKey(),
+                UUID.fromString(row.leaseId()),
+                claimed.previousStatus(),
+                claimed.previousAvailableAtMillis());
+    }
+
+    private QueueEventRecord transitionEvent(
+            SqliteMetadataProjectionStore.FileRow row,
+            ProcessingLease lease,
+            QueueEventType type,
+            FileProcessingStatus status,
+            int retryCount,
+            Instant availableAt,
+            String errorMessage) {
+        return new QueueEventRecord(
+                1,
+                UUID.randomUUID(),
+                lease.tenantId(),
+                lease.fileKey(),
+                type,
+                clock.instant(),
+                1,
+                row.volumeId(),
+                Path.of(row.physicalPath()),
+                row.logicalDirectory(),
+                row.fileSize(),
+                status,
+                lease.leaseId(),
+                type == QueueEventType.PROCESSING_TIMED_OUT ? lease.startedAt() : null,
+                retryCount,
+                availableAt,
+                errorMessage,
+                row.originalFileName(),
+                row.fileExtension());
+    }
+
+    private void appendTransition(String tenantId, QueueEventRecord event) {
+        Object lock = sequenceLocks.computeIfAbsent(tenantId, ignored -> new Object());
+        synchronized (lock) {
+            QueueEventRecord sequenced = withSequence(event, nextSequence(tenantId));
+            boolean appended = false;
+            try {
+                journal.append(sequenced);
+                appended = true;
+                projection.projectTenantUntilCaughtUp(tenantId, 128);
+            } catch (RuntimeException failure) {
+                if (!appended) sequences.get(tenantId).decrementAndGet();
+                throw failure;
+            }
+        }
+    }
+
+    private static QueueEventRecord withSequence(QueueEventRecord event, long sequence) {
+        return new QueueEventRecord(
+                event.schemaVersion(),
+                event.eventId(),
+                event.tenantId(),
+                event.fileKey(),
+                event.eventType(),
+                event.occurredAt(),
+                sequence,
+                event.volumeId(),
+                event.physicalPath(),
+                event.logicalDirectory(),
+                event.fileSize(),
+                event.status(),
+                event.leaseId(),
+                event.processingStartedAt(),
+                event.retryCount(),
+                event.availableAt(),
+                event.errorMessage(),
+                event.originalFileName(),
+                event.fileExtension());
+    }
+
+    private static void requireLease(ProcessingLease lease) {
+        Objects.requireNonNull(lease, "lease");
+    }
+
+    private static void requireActiveLease(SqliteMetadataProjectionStore.FileRow row, ProcessingLease lease) {
+        if (row.status() != FileProcessingStatus.PROCESSING
+                || row.leaseId() == null
+                || !row.leaseId().equals(lease.leaseId().toString())
+                || !row.tenantId().equals(lease.tenantId())
+                || !row.fileKey().equals(lease.fileKey())) {
+            throw new LeaseMismatchException("Lease does not own active processing file");
+        }
+    }
+
+    private static String leaseKey(ProcessingLease lease) {
+        return leaseKey(lease.tenantId(), lease.fileKey(), lease.leaseId());
+    }
+
+    private static String leaseKey(String tenantId, String fileKey, UUID leaseId) {
+        return tenantId + '\u0000' + fileKey + '\u0000' + leaseId;
+    }
+
+    private LeaseOutcome knownOutcome(ProcessingLease lease) {
+        String key = leaseKey(lease);
+        LeaseOutcome cached = releasedLeases.get(key);
+        if (cached != null) return cached;
+        try {
+            var batch = journal.readBatch(lease.tenantId(), journal.baseOffset(lease.tenantId()), Integer.MAX_VALUE);
+            for (QueueEventRecord event : batch.events()) {
+                if (!lease.fileKey().equals(event.fileKey()) || !lease.leaseId().equals(event.leaseId())) continue;
+                LeaseOutcome outcome =
+                        switch (event.eventType()) {
+                            case PROCESSING_COMPLETED -> LeaseOutcome.COMPLETED;
+                            case PROCESSING_FAILED -> LeaseOutcome.FAILED;
+                            case PROCESSING_TIMED_OUT -> LeaseOutcome.TIMED_OUT;
+                            default -> null;
+                        };
+                if (outcome != null) {
+                    releasedLeases.put(key, outcome);
+                    return outcome;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // The metadata transition below remains authoritative for active leases.
+        }
+        return null;
+    }
+
+    private static RetryConfiguration defaultRetryConfiguration() {
+        return new RetryConfiguration(3, Duration.ofSeconds(5), true, Duration.ofMinutes(5));
+    }
+
+    private enum LeaseOutcome {
+        COMPLETED,
+        FAILED,
+        TIMED_OUT
     }
 
     @Override
