@@ -242,7 +242,9 @@ public final class DocumentService {
 The starter owns runtime startup and shutdown; application code must not call
 `start()` or `close()` on an injected runtime. For advanced integrations,
 inject `StowRuntime` directly and use its service accessors. The starter does
-not expose internal implementation classes.
+not expose internal implementation classes. Do not call `Stow.open(...)` or
+create another runtime in a Spring-managed service: that would bypass the
+Spring singleton and its lifecycle management.
 
 ## Runnable Examples
 

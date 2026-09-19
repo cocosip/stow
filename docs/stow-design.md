@@ -341,8 +341,10 @@ provided with `@ConditionalOnMissingBean`; internal components cannot be
 replaced. The starter adds no logging provider or bridge.
 
 Applications inject `StoragePool`, `TenantManager`, or `StowRuntime` by
-constructor. The starter owns startup and shutdown, so application code does
-not call `start()` or `close()` on injected beans.
+constructor. The starter initializes the runtime before dependent beans are
+created and owns startup and shutdown, so application code does not call
+`start()` or `close()` on injected beans. Do not call `Stow.open(...)` or
+create a second runtime in a Spring-managed service.
 
 ## 21. Exception Model
 

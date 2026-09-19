@@ -457,9 +457,12 @@ public final class DocumentService {
 }
 ```
 
-The starter owns startup and shutdown. Application code must not call
-`start()` or `close()` on an injected runtime. The core remains independent of
-Spring and does not expose internal implementation beans.
+The starter initializes the runtime before dependent beans are created and
+owns startup and shutdown. Application code must not call `start()` or
+`close()` on an injected runtime. Do not call `Stow.open(...)` or create a
+second runtime from a Spring-managed service; inject the single Spring-managed
+`StowRuntime` or one of its public service beans. The core remains independent
+of Spring and does not expose internal implementation beans.
 
 ## 12. Logging Contract
 
