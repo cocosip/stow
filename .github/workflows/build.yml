@@ -35,7 +35,7 @@ jobs:
 
       - name: Run Maven verification on Linux
         if: runner.os != 'Windows'
-        run: ./mvnw -B -ntp verify
+        run: sh ./mvnw -B -ntp verify
 
       - name: Run Maven verification on Windows
         if: runner.os == 'Windows'

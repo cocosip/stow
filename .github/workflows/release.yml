@@ -44,4 +44,4 @@ jobs:
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Verify and publish
-        run: ./mvnw -B -ntp -Drevision="$RELEASE_VERSION" -Prelease deploy
+        run: sh ./mvnw -B -ntp -Drevision="$RELEASE_VERSION" -Prelease deploy
