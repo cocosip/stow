@@ -70,8 +70,8 @@ class CrashRecoveryIT {
     }
 
     private Process startChild(Path root, Path childError) throws Exception {
-        String javaExecutable =
-                Path.of(System.getProperty("java.home"), "bin", "java.exe").toString();
+        String javaExecutable = Path.of(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java")
+                .toString();
         return new ProcessBuilder(
                         javaExecutable,
                         "-cp",
