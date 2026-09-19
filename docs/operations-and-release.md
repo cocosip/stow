@@ -1,12 +1,12 @@
-# Operations And Recovery
+# Operations And Release Guide
 
 ## Runtime Directories
 
 A Stow runtime allows only one process to own a set of runtime directories.
 `metadata` stores tenants and SQLite projections, `quota` stores quota ledgers,
 `queue` stores per-tenant journals, `watchers` stores watcher configuration and
-import history, and volume directories store physical files. Do not share these
-directories between processes.
+import history, and volume directories store physical files. Do not share
+these directories between processes.
 
 At startup the runtime acquires an exclusive lock, opens tenant and quota
 databases, scans journals, repairs only deterministic truncated tails, and
@@ -15,8 +15,6 @@ values and ambiguous frame corruption fail startup instead of silently losing
 data.
 
 ## Normal Processing
-
-All operations go through the public services exposed by `StowRuntime`:
 
 ```java
 try (StowRuntime runtime = Stow.open(configuration)) {
@@ -29,11 +27,11 @@ try (StowRuntime runtime = Stow.open(configuration)) {
 ```
 
 `complete` does not immediately delete the physical file. According to the
-retention settings, `StorageMaintenance.cleanupCompleted` emits delete events;
-metadata and quota are released only after the projection confirms
-`DELETE_SUCCEEDED`. Report processing errors with `fail(lease, message)`. Once
-the retry limit is reached, `permanentlyFailedDisposition` moves the item to
-dead-letter or retains it.
+retention settings, `StorageMaintenance` emits delete events; metadata and
+quota are released only after the projection confirms `DELETE_SUCCEEDED`.
+Report processing errors with `fail(lease, message)`. Once the retry limit is
+reached, `permanentlyFailedDisposition` moves the item to dead-letter or
+retains it.
 
 ## Diagnosis, Replay, And Rebuild
 
@@ -56,8 +54,7 @@ maintenance.optimizeDatabases();
 Before rebuilding, preserve database backups and verify that journals and
 volumes are readable. Metadata rebuilds use the snapshot and journal as their
 source of truth; quota rebuilds use active metadata rows. After rebuilding,
-call `checkDatabases` again and verify `storagePool().findFileInfo`, file
-content, and quota counts.
+call `checkDatabases` again and verify file content and quota counts.
 
 ## Cleanup And Orphans
 
@@ -71,8 +68,49 @@ maintenance.cleanupEmptyDirectories();
 
 Orphan recovery adopts only physical files that match the Stow file-key naming
 rules but have no corresponding `ACCEPTED` event or metadata row. Files that
-cannot be identified safely are not deleted. Record every cleanup error summary
-and retry it during the next maintenance cycle.
+cannot be identified safely are not deleted. Record every cleanup error and
+retry it during the next maintenance cycle.
+
+## Build And Version Management
+
+The Maven reactor uses one project version and centrally managed dependency and
+plugin versions. The root POM uses `${revision}` with `0.1.0-SNAPSHOT` as the
+development default. Child modules do not declare independent versions and
+reactor dependencies use `${project.version}`.
+
+Published modules use `flatten-maven-plugin` in
+`resolveCiFriendliesOnly` mode. Source POMs retain `${revision}` while install
+and deploy use a flattened POM with a concrete version. Samples and benchmarks
+set `maven.deploy.skip=true`; only `stow-core` and
+`stow-spring-boot-starter` are release artifacts.
+
+The build-baseline test checks recursive module discovery, version alignment,
+dependency/plugin management, flattened consumer POMs, and deploy skip flags.
+
+## GitHub Actions And Central Portal
+
+Pushes and pull requests targeting `master` run `./mvnw -B -ntp verify` on
+Linux and Windows with JDK 21. The branch workflow never deploys artifacts.
+
+Tags matching `v*` run the same verification and then execute:
+
+```bash
+./mvnw -B -ntp -Drevision="$RELEASE_VERSION" -Prelease deploy
+```
+
+The release profile signs artifacts and uploads the bundle to Sonatype Central
+Portal. Configure these repository secrets before creating a tag:
+
+| Secret | Purpose |
+| --- | --- |
+| `MAVEN_CENTRAL_USERNAME` | Central Portal user-token username |
+| `MAVEN_CENTRAL_TOKEN` | Central Portal user-token password |
+| `MAVEN_GPG_PRIVATE_KEY` | ASCII-armored private signing key |
+| `MAVEN_GPG_PASSPHRASE` | Signing key passphrase |
+
+The Maven server id is `central`. No credentials are committed to source
+control. A tag such as `v1.0.0` publishes version `1.0.0`; the leading `v` is
+removed before passing `revision` to Maven.
 
 ## Incident Order
 
@@ -80,14 +118,14 @@ and retry it during the next maintenance cycle.
    SQLite or `queue.log` directly.
 2. Copy `metadata`, `quota`, `queue`, and volume directories as read-only
    evidence.
-3. Check `runtime.health()` and `maintenance.checkDatabases()` to distinguish a
-   journal, projection, database, or volume failure.
+3. Check `runtime.health()` and `maintenance.checkDatabases()` to distinguish
+   journal, projection, database, and volume failures.
 4. Replay projections first; rebuild metadata or quota only after confirming
    database corruption.
 5. Reclaim timed-out processing and recover physical orphans, then reconcile
    quotas before resuming writes.
-6. Record the time, tenant, command, and returned statistics as release or
-   incident evidence.
+6. Record the time, tenant, command, and returned statistics as incident or
+   release evidence.
 
 Never delete `queue.log`, cursor, snapshot, or reservation files manually to
 clear a backlog. Recovery code and the public maintenance APIs own those files.

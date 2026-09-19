@@ -1,7 +1,8 @@
 # Stow Documentation
 
-This directory contains the stable design, API, persistence, operations, and
-release documentation for Stow. The public quick start and runnable examples
+This directory contains the stable English design, API, persistence, and
+operations documentation for Stow. The public quick start, Spring Boot
+integration guide, runnable examples, logging guidance, and benchmark baseline
 are in the [root README](../README.md).
 
 ## Normative Specifications
@@ -14,24 +15,15 @@ are in the [root README](../README.md).
   SQLite schemas, journal formats, state transitions, and crash invariants.
 
 These three documents are the source of truth for compatibility and durable
-data formats. They are intentionally kept separate from user-facing guides.
-Their original Simplified Chinese wording is preserved because the exact
-contract text is part of the project's design baseline; all user-facing and
-operational documentation is maintained in English.
+data formats. They are intentionally kept separate from operational guidance.
+All normative and user-facing documentation is maintained in English.
 
-## User And Operator Guides
+## Operations And Release
 
-- [Configuration reference](configuration-reference.md): builder defaults,
-  Spring Boot property names, validation, and supported enum values.
-- [Logging](logging.md): SLF4J 2 API usage, provider selection, and the legacy
-  compatibility profile.
-- [Operations and recovery](operations-and-recovery.md): normal processing,
-  replay, rebuild, cleanup, orphan recovery, and incident handling.
-- [Release verification](release-verification.md): branch checks, Central
-  Portal publishing, and required GitHub Actions secrets.
-- [Build and version management](build-version-management.md): reactor
-  versioning, dependency/plugin management, and publish constraints.
+- [Operations and release guide](operations-and-release.md): runtime
+  directories, replay and recovery, incident handling, build/version rules,
+  GitHub Actions, and Central Portal publishing.
 
 The former implementation-plan document was development-only material and is
 not part of the documentation set. Historical task progress belongs in Git
-history; stable behavior belongs in the specifications and guides above.
+history; stable behavior belongs in the specifications and guide above.

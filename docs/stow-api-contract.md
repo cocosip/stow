@@ -1,20 +1,22 @@
-# Stow 1.0 公共 API 与配置契约
+# Stow 1.0 Public API And Configuration Contract
 
-## 1. 兼容性范围
+## 1. Compatibility Scope
 
-- Maven groupId：`io.github.cocosip`
-- Java 根包：`io.github.cocosip.stow`
-- Java：OpenJDK 21，`--release 21`
-- 核心制品：`stow-core`
-- 框架适配：`stow-spring-boot-starter`
-- 核心 API：同步阻塞、线程安全、虚拟线程友好
-- 时间：`java.time.Instant` 与 `java.time.Duration`
-- 可空查询结果：`Optional<T>`；集合永不返回 `null`
-- 日志：仅依赖 `slf4j-api:2.0.17`，不携带 Provider；provider 由宿主选择
+- Maven group: `io.github.cocosip`
+- Java root package: `io.github.cocosip.stow`
+- Java baseline: OpenJDK 21 with `--release 21`
+- Core artifact: `stow-core`
+- Framework adapter: `stow-spring-boot-starter`
+- API model: synchronous, blocking, thread-safe, and virtual-thread friendly
+- Time types: `java.time.Instant` and `java.time.Duration`
+- Optional queries: `Optional<T>`; collections never return `null`
+- Logging: `slf4j-api:2.0.17` only; the host application selects the provider
 
-`io.github.cocosip.stow.internal` 下的类型不属于兼容承诺。公开 API 只能暴露根包、`api`、`model`、`config`、`exception` 和明确公开的 `spi` 类型。
+Types under `io.github.cocosip.stow.internal` are not compatibility promises.
+Public APIs may expose only root-package, `api`, `model`, `config`,
+`exception`, and explicitly public `spi` types.
 
-## 2. 运行时入口
+## 2. Runtime Entry Points
 
 ```java
 package io.github.cocosip.stow;
@@ -46,9 +48,10 @@ public enum RuntimeState {
 }
 ```
 
-`Stow.builder().build()` 返回 `NEW` 状态且不创建线程；`start()` 完成恢复后进入 `RUNNING`。`Stow.open` 等价于 build + start。`start()` 只允许从 `NEW` 调用；重复调用抛出 `IllegalStateException`。`close()` 在任何状态下幂等。
-
-`StowBuilder` 只允许覆盖完整配置、`Clock`、工作执行器、调度器和公开 SPI。未提供的资源由 runtime 创建并拥有；调用方提供的资源由调用方关闭。
+`Stow.builder().build()` returns `NEW` without creating background threads.
+`start()` performs recovery and enters `RUNNING`; `Stow.open` is build plus
+start. `start()` is valid only from `NEW`; a repeated call throws
+`IllegalStateException`. `close()` is idempotent in every state.
 
 ```java
 public final class StowBuilder {
@@ -61,6 +64,10 @@ public final class StowBuilder {
     public StowRuntime build();
 }
 ```
+
+The builder accepts only complete configuration, `Clock`, executors, scheduler,
+and public SPI implementations. Runtime-owned resources are closed by the
+runtime; caller-owned resources remain the caller's responsibility.
 
 ## 3. StoragePool
 
@@ -95,7 +102,11 @@ public final class ContentSources {
 }
 ```
 
-`InputStream` 重载只尝试一个卷且不关闭调用方流。`ContentSource` 重载在 `repeatable=true` 时可以为每次卷重试重新调用 `openStream()`，并负责关闭每次打开的流；`repeatable=false` 时同样只尝试一个卷。内置工厂提供 path、byte array 和单次 InputStream 三种来源。
+The `InputStream` overload makes one volume attempt and does not close the
+caller's stream. A repeatable `ContentSource` may be opened again for a volume
+retry and each opened stream is closed by Stow. A non-repeatable source makes
+one attempt. Built-in factories cover paths, byte arrays, and single-use
+streams.
 
 ```java
 public record WriteOptions(String originalFileName, String logicalDirectory) {
@@ -136,39 +147,36 @@ public record FileLocation(
         Instant availableAt) {}
 ```
 
-`WriteOptions` 的两个字段允许为 `null`，进入核心后分别规范为无原始文件名和根逻辑目录 `/`。其他 record 的必填字段在紧凑构造器中校验。错误信息最大 4096 个字符，原始文件名最大 255 个字符，扩展名最大 32 个字符。
+The two `WriteOptions` fields may be `null`; the core normalizes them to no
+original filename and `/`. Other records validate required fields in compact
+constructors. Error messages are limited to 4096 characters, original names to
+255 characters, and extensions to 32 characters.
 
-`read` 返回的 `InputStream` 由调用方关闭。跨租户查询返回空，跨租户读取抛出 `StoredFileNotFoundException`，不泄露文件存在性。
+`read` returns a caller-owned stream. Cross-tenant queries return empty and
+cross-tenant reads throw `StoredFileNotFoundException` without revealing file
+existence.
 
-## 4. 状态与事件
+## 4. States And Events
 
 ```java
 public enum FileProcessingStatus {
-    PENDING,
-    PROCESSING,
-    COMPLETED,
-    FAILED,
-    PERMANENTLY_FAILED,
-    DELETE_REQUESTED,
-    DELETE_SUCCEEDED,
-    DEAD_LETTERED
+    PENDING, PROCESSING, COMPLETED, FAILED,
+    PERMANENTLY_FAILED, DELETE_REQUESTED, DELETE_SUCCEEDED, DEAD_LETTERED
 }
 
 public enum QueueEventType {
-    ACCEPTED,
-    PROCESSING_STARTED,
-    PROCESSING_FAILED,
-    PROCESSING_COMPLETED,
-    DELETE_REQUESTED,
-    DELETE_SUCCEEDED,
-    PROCESSING_TIMED_OUT,
-    DEAD_LETTERED
+    ACCEPTED, PROCESSING_STARTED, PROCESSING_FAILED, PROCESSING_COMPLETED,
+    DELETE_REQUESTED, DELETE_SUCCEEDED, PROCESSING_TIMED_OUT, DEAD_LETTERED
 }
 ```
 
-`QueueEventRecord` 是不可变 record，包含 `schemaVersion`、`eventId`、`tenantId`、`fileKey`、`eventType`、`occurredAt`、`sequenceNumber`、`volumeId`、`physicalPath`、`logicalDirectory`、`fileSize`、`status`、`leaseId`、`processingStartedAt`、`retryCount`、`availableAt`、`errorMessage`、`originalFileName` 和 `fileExtension`。CRC 位于 journal frame，不放进业务 record。
+`QueueEventRecord` is immutable and contains schema version, event ID, tenant,
+file key, event type, UTC time, per-tenant sequence, volume, physical path,
+logical directory, size, status, lease, processing time, retry count,
+availability time, error message, original filename, and extension. CRC is a
+journal-frame field, not a business-record field.
 
-## 5. 租户与配额 API
+## 5. Tenant And Quota APIs
 
 ```java
 public interface TenantManager {
@@ -180,7 +188,8 @@ public interface TenantManager {
     void disable(String tenantId);
 }
 
-public record TenantContext(String tenantId, TenantStatus status, Instant createdAt, Instant updatedAt) {}
+public record TenantContext(String tenantId, TenantStatus status,
+                            Instant createdAt, Instant updatedAt) {}
 public enum TenantStatus { ENABLED, DISABLED }
 
 public interface TenantQuotaManager {
@@ -195,16 +204,15 @@ public interface DirectoryQuotaManager {
 }
 
 public record DirectoryQuota(
-        String tenantId,
-        String logicalDirectory,
-        long currentCount,
-        long maxFiles,
-        boolean enabled) {}
+        String tenantId, String logicalDirectory, long currentCount,
+        long maxFiles, boolean enabled) {}
 ```
 
-配额值 0 表示无限制。所有计数使用 `long`，不得因 Java `int` 溢出。默认租户配额只在创建租户时复制，修改配置不改变已存在租户。
+Quota value `0` means unlimited. Counts use `long`. The configured default
+tenant quota is copied only when a tenant is created; changing the default does
+not rewrite existing tenants.
 
-## 6. 维护与投影 API
+## 6. Maintenance And Projection APIs
 
 ```java
 public interface StorageMaintenance {
@@ -232,7 +240,9 @@ public interface QueueProjectionMaintenance {
 }
 ```
 
-维护结果 record 必须包含开始/结束时间、扫描数量、成功数量、跳过数量、失败数量、释放字节数和受影响租户数。单项错误以不可变错误摘要列表返回，同时记录日志；事实损坏或无法继续的错误仍抛异常。
+Maintenance result records include start/end time, scanned, succeeded,
+skipped, failed, released bytes, affected tenants, and immutable error
+summaries. Fact corruption or an operation that cannot continue still throws.
 
 ## 7. Watcher API
 
@@ -266,9 +276,13 @@ public interface FileWatcherAutoManager {
 public enum PostImportAction { DELETE, MOVE, KEEP }
 ```
 
-`WatcherConfiguration` 包含 watcher ID、tenant ID、多租户模式、自动创建租户目录、watch path、启用状态、递归、glob 列表、后置动作、移动目录、轮询周期、最大文件大小、最小年龄、稳定性检查、并发导入、历史裁剪和历史刷写设置。所有集合创建防御性副本。
+`WatcherConfiguration` contains watcher and tenant IDs, single- or
+multi-tenant mode, automatic tenant-directory creation, path, enabled and
+recursive flags, globs, post-import action and move directory, polling and
+stability settings, size/age limits, import concurrency, and history retention
+and flush settings. Collections are defensively copied.
 
-## 8. 统计与健康 API
+## 8. Statistics And Health APIs
 
 ```java
 public interface StatisticsReader {
@@ -276,23 +290,23 @@ public interface StatisticsReader {
 }
 
 public record StatisticsQuery(
-        Instant from,
-        Instant to,
-        String tenantId,
-        String volumeId,
-        String watcherId,
-        String operation) {}
+        Instant from, Instant to, String tenantId, String volumeId,
+        String watcherId, String operation) {}
 
 public enum HealthStatus { UP, DEGRADED, DOWN }
-public record ComponentHealth(HealthStatus status, String summary, Instant checkedAt) {}
-public record RuntimeHealth(HealthStatus status, Map<String, ComponentHealth> components) {}
+public record ComponentHealth(HealthStatus status, String summary,
+                              Instant checkedAt) {}
+public record RuntimeHealth(HealthStatus status,
+                            Map<String, ComponentHealth> components) {}
 ```
 
-统计快照至少包含写文件数、写字节、MiB/s、读取数、领取数、完成数、SQLite 持久化操作数、watcher 导入数和导入字节。返回 Map/List 均为不可变快照。
+Snapshots include at least written files/bytes and MiB/s, reads, claims,
+completions, SQLite persistence operations, watcher imports, and import bytes.
+Returned maps and lists are immutable snapshots.
 
-## 9. 公开 SPI
+## 9. Public SPI
 
-1.0 只公开确有替换价值的边界：
+Only replacement boundaries with practical value are public in 1.0:
 
 ```java
 public interface StorageVolume extends AutoCloseable {
@@ -319,83 +333,97 @@ public interface JournalCodec {
 }
 ```
 
-`MetadataProjectionStore` 与 `QueueEventJournal` 为高级 SPI，标记 Stow 自己的 `@ExperimentalApi` 注解，并在 1.x 内允许经弃用周期调整；默认调用方不需要实现它们。
+`MetadataProjectionStore` and `QueueEventJournal` are advanced SPIs marked
+with Stow's `@ExperimentalApi`. They may change during a deprecation period in
+the 1.x line; ordinary callers do not need to implement them.
 
-## 10. 配置契约与默认值
+## 10. Configuration And Defaults
 
-`StowConfiguration` 是聚合 record，由 `StowConfiguration.builder()` 创建。所有路径在 build 时转为绝对规范路径。
+`StowConfiguration` is an aggregate record created by
+`StowConfiguration.builder()`. Every path becomes an absolute normalized path
+during `build()`.
 
-| 分组 | 配置 | 默认值 |
+| Group | Property | Default |
 | --- | --- | --- |
-| paths | metadataDirectory | `./stow-metadata` |
-| paths | quotaDirectory | `./stow-quota` |
-| paths | queueDirectory | `./stow-queue` |
-| paths | watcherDirectory | `./stow-watchers` |
-| tenant | autoCreateTenants | `false` |
-| tenant | defaultQuota | `0` |
-| metadata | backgroundPersistence | `true` |
-| metadata | maxQueueSize | `100000` |
-| metadata | drainBatchSize | `2000` |
-| metadata | softMergeThresholdPercent | `90` |
-| metadata | startupLoadBatchSize | `2000` |
-| metadata | shutdownDrainTimeout | `30s` |
-| metadata | persistenceInterval | `2s` |
-| storage | completionGuardStripes | `256` |
-| storage | emptyQueueReclaimBatchSize | `32` |
-| storage | backgroundReclaimBatchSize | `8` |
-| storage | reclaimCooldown | `30s` |
-| storage | backgroundReclaimEnabled | `true` |
-| sqlite | journalMode | `WAL` |
-| sqlite | synchronousMode | `NORMAL` |
-| sqlite | cacheSizeKb | `-4000` |
-| sqlite | busyTimeout | `5s` |
-| sqlite | checkpointAfterBatch | `false` |
-| retry | maxRetryCount | `3` |
-| retry | initialDelay | `5s` |
-| retry | exponentialBackoff | `true` |
-| retry | maxDelay | `5m` |
-| journal | enabled | `true` |
-| journal | projectionEnabled | `true` |
-| journal | format | `BINARY_V1` |
-| journal | ackMode | `DURABLE` |
-| journal | stateFlushDebounce | `1s` |
-| journal | linger | `1ms` |
-| journal | maxBatchRecords | `16` |
-| journal | maxBatchBytes | `262144` |
-| journal | writerIdleTimeout | `30s` |
-| journal | asyncQueueCapacityPerTenant | `8192` |
-| journal | balancedFlushWindow | `5ms` |
-| projection | maxRecordsPerTenantCycle | `64` |
-| projection | maxTenantsPerCycle | `8` |
-| projection | busyCycleDelay | `500ms` |
-| projection | idleCycleDelay | `5s` |
-| projection | cycleTimeBudget | `2s` |
-| snapshot | enabled | `true` |
-| snapshot | interval | `15m` |
-| snapshot | minimumProgressBytes | `1048576` |
-| compaction | enabled | `true` |
-| compaction | minimumProcessedBytes | `4194304` |
-| cleanup | enabled | `true` |
-| cleanup | interval | `1h` |
-| cleanup | initialDelay | `1m` |
-| cleanup | processingTimeout | `30m` |
-| cleanup | completedRetention | `0s` |
-| cleanup | failedRetention | `3d` |
-| cleanup | permanentlyFailedDisposition | `MOVE_TO_DEAD_LETTER` |
-| cleanup | batchSizePerTenant | `500` |
-| orphanRecovery | enabled | `false` |
-| orphanRecovery | runOnStartup | `false` |
-| orphanRecovery | interval | `6h` |
-| statistics | enabled | `false` |
-| statistics | windowSize | `5m` |
-| statistics | retention | `1h` |
-| statistics | maxSeries | `16384` |
+| paths | `metadataDirectory` | `./stow-metadata` |
+| paths | `quotaDirectory` | `./stow-quota` |
+| paths | `queueDirectory` | `./stow-queue` |
+| paths | `watcherDirectory` | `./stow-watchers` |
+| tenant | `autoCreateTenants` | `false` |
+| tenant | `defaultQuota` | `0` (unlimited) |
+| metadata | `backgroundPersistence` | `true` |
+| metadata | `maxQueueSize` | `100000` |
+| metadata | `drainBatchSize` | `2000` |
+| metadata | `softMergeThresholdPercent` | `90` |
+| metadata | `startupLoadBatchSize` | `2000` |
+| metadata | `shutdownDrainTimeout` | `30s` |
+| metadata | `persistenceInterval` | `2s` |
+| storage | `completionGuardStripes` | `256` |
+| storage | `emptyQueueReclaimBatchSize` | `32` |
+| storage | `backgroundReclaimBatchSize` | `8` |
+| storage | `reclaimCooldown` | `30s` |
+| storage | `backgroundReclaimEnabled` | `true` |
+| sqlite | `journalMode` | `WAL` |
+| sqlite | `synchronousMode` | `NORMAL` |
+| sqlite | `cacheSizeKb` | `-4000` |
+| sqlite | `busyTimeout` | `5s` |
+| sqlite | `checkpointAfterBatch` | `false` |
+| retry | `maxRetryCount` | `3` |
+| retry | `initialDelay` | `5s` |
+| retry | `exponentialBackoff` | `true` |
+| retry | `maxDelay` | `5m` |
+| journal | `enabled` | `true` (cannot be disabled) |
+| journal | `projectionEnabled` | `true` |
+| journal | `format` | `BINARY_V1` |
+| journal | `ackMode` | `DURABLE` |
+| journal | `stateFlushDebounce` | `1s` |
+| journal | `linger` | `1ms` |
+| journal | `maxBatchRecords` | `16` |
+| journal | `maxBatchBytes` | `262144` |
+| journal | `writerIdleTimeout` | `30s` |
+| journal | `asyncQueueCapacityPerTenant` | `8192` |
+| journal | `balancedFlushWindow` | `5ms` |
+| projection | `maxRecordsPerTenantCycle` | `64` |
+| projection | `maxTenantsPerCycle` | `8` |
+| projection | `busyCycleDelay` | `500ms` |
+| projection | `idleCycleDelay` | `5s` |
+| projection | `cycleTimeBudget` | `2s` |
+| snapshot | `enabled` | `true` |
+| snapshot | `interval` | `15m` |
+| snapshot | `minimumProgressBytes` | `1048576` |
+| compaction | `enabled` | `true` |
+| compaction | `minimumProcessedBytes` | `4194304` |
+| cleanup | `enabled` | `true` |
+| cleanup | `interval` | `1h` |
+| cleanup | `initialDelay` | `1m` |
+| cleanup | `processingTimeout` | `30m` |
+| cleanup | `completedRetention` | `0s` |
+| cleanup | `failedRetention` | `3d` |
+| cleanup | `permanentlyFailedDisposition` | `MOVE_TO_DEAD_LETTER` |
+| cleanup | `batchSizePerTenant` | `500` |
+| orphanRecovery | `enabled` | `false` |
+| orphanRecovery | `runOnStartup` | `false` |
+| orphanRecovery | `interval` | `6h` |
+| statistics | `enabled` | `false` |
+| statistics | `windowSize` | `5m` |
+| statistics | `retention` | `1h` |
+| statistics | `maxSeries` | `16384` |
 
-所有容量、数量、时长和百分比在 build 时验证。journal 不能在没有显式测试开关的情况下关闭；生产配置不公开 legacy non-journal 模式。
+Volumes require unique IDs, safe mount paths, sharding depth `0..3`, a
+positive buffer size, and default `forceFlushAfterWrite=false`. Watchers are
+empty by default; required fields are `watcher-id`, `tenant-id`, and
+`watch-path`. Their defaults are enabled, non-recursive, `[*]`, `KEEP`, a 5s
+poll interval, zero minimum age, a 100ms stability interval, two stability
+checks, one concurrent import, 7d history retention, and a 1s history flush.
 
-## 11. Spring Boot 映射
+All capacities, counts, durations, and percentages are validated during
+`build()`. The journal cannot be disabled without an explicit test-only switch;
+production configuration has no legacy non-journal mode.
 
-Starter 使用 `stow.*` 前缀，把 kebab-case 属性转换为上述核心配置，例如：
+## 11. Spring Boot Mapping And Dependency Injection
+
+The starter uses the `stow.*` prefix and maps kebab-case properties to the
+same core configuration:
 
 ```yaml
 stow:
@@ -411,10 +439,69 @@ stow:
       force-flush-after-write: true
 ```
 
-Starter 只公开一个 `StowRuntime` Bean，并从它转发公开服务 Bean。不得让 Spring 容器单独拥有核心内部组件。
+The starter creates one `StowRuntime`, manages its `SmartLifecycle`, and
+exposes `StoragePool`, `TenantManager`, quota managers, maintenance services,
+watcher services, and `StatisticsReader` as beans. Applications may use
+constructor injection:
 
-## 12. 异常契约
+```java
+@Service
+public final class DocumentService {
+    private final StoragePool storagePool;
+    private final TenantManager tenantManager;
 
-所有领域异常继承非受检 `StowException`。固定子类包括 `InvalidConfigurationException`、`RuntimeNotReadyException`、`RuntimeDirectoryLockedException`、`TenantNotFoundException`、`TenantDisabledException`、`TenantQuotaExceededException`、`DirectoryQuotaExceededException`、`InsufficientStorageException`、`StorageVolumeUnavailableException`、`StoredFileNotFoundException`、`FileAlreadyProcessingException`、`LeaseMismatchException`、`PhysicalFileMissingException`、`JournalCorruptionException`、`ProjectionException`、`DatabaseRecoveryException` 和 `StowInterruptedException`。
+    public DocumentService(StoragePool storagePool, TenantManager tenantManager) {
+        this.storagePool = storagePool;
+        this.tenantManager = tenantManager;
+    }
+}
+```
 
-异常携带稳定 error code；消息用于诊断但不是机器协议。中断时必须恢复线程中断标志。公开 API 不吞异常，不使用 `null` 表示失败。
+The starter owns startup and shutdown. Application code must not call
+`start()` or `close()` on an injected runtime. The core remains independent of
+Spring and does not expose internal implementation beans.
+
+## 12. Logging Contract
+
+`stow-core` depends only on `org.slf4j:slf4j-api:2.0.17`. It does not include
+Logback, Log4j2, a JUL bridge, or any binding/provider. The host application
+must select exactly one SLF4J 2 provider. With only the API present, SLF4J's
+standard NOP-provider warning is expected and Stow remains functional.
+
+For example, an application may choose Logback:
+
+```xml
+<dependency>
+  <groupId>org.slf4j</groupId>
+  <artifactId>slf4j-api</artifactId>
+  <version>2.0.17</version>
+</dependency>
+<dependency>
+  <groupId>ch.qos.logback</groupId>
+  <artifactId>logback-classic</artifactId>
+  <version>1.5.18</version>
+</dependency>
+```
+
+The `slf4j1-compat` profile validates a legacy host with API `1.7.36` and a
+test-only simple binding; it is never packaged into Stow. All logs use
+parameterized placeholders and avoid file content, full physical paths, and
+original filenames by default. `fileKey`, tenant, and path values are limited
+to necessary diagnostic events and remain controlled by host log levels.
+
+## 13. Exception Contract
+
+All domain exceptions extend unchecked `StowException`. Fixed subclasses are
+`InvalidConfigurationException`, `RuntimeNotReadyException`,
+`RuntimeDirectoryLockedException`, `TenantNotFoundException`,
+`TenantDisabledException`, `TenantQuotaExceededException`,
+`DirectoryQuotaExceededException`, `InsufficientStorageException`,
+`StorageVolumeUnavailableException`, `StoredFileNotFoundException`,
+`FileAlreadyProcessingException`, `LeaseMismatchException`,
+`PhysicalFileMissingException`, `JournalCorruptionException`,
+`ProjectionException`, `DatabaseRecoveryException`, and
+`StowInterruptedException`.
+
+Exceptions carry stable error codes; messages are diagnostic text, not a machine
+protocol. Interrupted operations restore the thread interrupt flag. Public
+APIs do not swallow failures or use `null` to represent failure.

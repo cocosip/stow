@@ -146,8 +146,8 @@ converted to absolute normalized paths during validation.
 
 Each `VolumeConfiguration` contains an id, mount path, sharding depth from `0`
 to `3`, a positive buffer size, and the `forceFlushAfterWrite` flag. The full
-property list, defaults, validation rules, and Spring Boot names are in
-[`docs/configuration-reference.md`](docs/configuration-reference.md).
+property list, defaults, validation rules, and Spring Boot names are in the
+[API and configuration contract](docs/stow-api-contract.md).
 
 ## Public API
 
@@ -170,11 +170,25 @@ for `read`, metadata lookup, location lookup, and status lookup. Queue workers
 call `claimNext` or `claimBatch`, then pass the exact `ProcessingLease` to
 `complete` or `fail`; a stale or mismatched lease is rejected.
 
-## Spring Boot
+## Spring Boot integration
 
-The starter binds `stow.*` properties, creates the `StowRuntime` bean, manages
-its lifecycle, and contributes Actuator health and Micrometer meters when the
-corresponding Spring Boot dependencies are present.
+Add the starter to a Spring Boot application. It brings in `stow-core`, binds
+`stow.*` properties, creates and starts one `StowRuntime`, and closes it during
+application shutdown. It also exposes the public Stow services as beans.
+Actuator health and Micrometer meters are registered only when those optional
+Spring Boot modules are on the classpath.
+
+Maven:
+
+```xml
+<dependency>
+  <groupId>io.github.cocosip</groupId>
+  <artifactId>stow-spring-boot-starter</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+Minimal `application.yml`:
 
 ```yaml
 stow:
@@ -193,9 +207,42 @@ stow:
       force-flush-after-write: true
 ```
 
-Inject `StowRuntime`, `StoragePool`, or `TenantManager` into a Spring bean and
-use the same API shown above. The starter does not expose internal
-implementation classes.
+Inject `StowRuntime`, `StoragePool`, or `TenantManager` into any application
+service. The injected services are backed by the same runtime and use the same
+tenant-scoped API as the framework-neutral example:
+
+```java
+@Service
+public final class DocumentService {
+    private final StoragePool storagePool;
+    private final TenantManager tenantManager;
+
+    public DocumentService(StoragePool storagePool, TenantManager tenantManager) {
+        this.storagePool = storagePool;
+        this.tenantManager = tenantManager;
+    }
+
+    public String store(String tenantId, byte[] bytes) {
+        TenantContext tenant = tenantManager.get(tenantId);
+        return storagePool.write(
+                tenant,
+                ContentSources.of(bytes),
+                WriteOptions.ofOriginalFileName("document.bin"));
+    }
+
+    public byte[] load(String tenantId, String fileKey) throws IOException {
+        TenantContext tenant = tenantManager.get(tenantId);
+        try (InputStream input = storagePool.read(tenant, fileKey)) {
+            return input.readAllBytes();
+        }
+    }
+}
+```
+
+The starter owns runtime startup and shutdown; application code must not call
+`start()` or `close()` on an injected runtime. For advanced integrations,
+inject `StowRuntime` directly and use its service accessors. The starter does
+not expose internal implementation classes.
 
 ## Runnable Examples
 
@@ -314,8 +361,4 @@ Only `io.github.cocosip:stow-core` and
 - [API and configuration contract](docs/stow-api-contract.md)
 - [Design](docs/stow-design.md)
 - [Persistence and recovery contract](docs/stow-persistence-contract.md)
-- [Configuration reference](docs/configuration-reference.md)
-- [Operations and recovery](docs/operations-and-recovery.md)
-- [Build and version management](docs/build-version-management.md)
-- [Logging](docs/logging.md)
-- [Release verification](docs/release-verification.md)
+- [Operations and release guide](docs/operations-and-release.md)
