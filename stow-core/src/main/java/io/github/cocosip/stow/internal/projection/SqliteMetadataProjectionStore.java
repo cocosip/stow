@@ -263,6 +263,16 @@ public final class SqliteMetadataProjectionStore {
         });
     }
 
+    public void clear(String tenantId) {
+        write(tenantId, connection -> {
+            try (PreparedStatement statement =
+                    connection.prepareStatement("DELETE FROM files; DELETE FROM applied_events")) {
+                statement.executeUpdate();
+            }
+            return null;
+        });
+    }
+
     long nowMillis() {
         return clock.instant().toEpochMilli();
     }

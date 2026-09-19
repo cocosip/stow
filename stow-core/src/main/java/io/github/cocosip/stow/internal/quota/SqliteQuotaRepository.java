@@ -4,6 +4,7 @@ import io.github.cocosip.stow.config.SqliteConfiguration;
 import io.github.cocosip.stow.exception.DirectoryQuotaExceededException;
 import io.github.cocosip.stow.exception.ProjectionException;
 import io.github.cocosip.stow.exception.TenantQuotaExceededException;
+import io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore;
 import io.github.cocosip.stow.model.DirectoryQuota;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -187,6 +188,41 @@ public final class SqliteQuotaRepository {
                 return null;
             }
             decrementCounts(connection, normalized);
+            return null;
+        });
+    }
+
+    public void rebuildFromMetadata(String tenantId, java.util.List<SqliteMetadataProjectionStore.FileRow> files) {
+        write(tenantId, connection -> {
+            long now = nowMillis();
+            try (PreparedStatement clear = connection.prepareStatement(
+                    "DELETE FROM quota_reservations; DELETE FROM applied_quota_events; DELETE FROM directory_quotas")) {
+                clear.executeUpdate();
+            }
+            try (PreparedStatement reset = connection.prepareStatement(
+                    "UPDATE tenant_quota SET current_count=0, updated_at_ms=?, row_version=row_version+1 WHERE singleton_id=1")) {
+                reset.setLong(1, now);
+                reset.executeUpdate();
+            }
+            java.util.Map<String, Long> counts = new java.util.HashMap<>();
+            for (SqliteMetadataProjectionStore.FileRow file : files)
+                counts.merge(file.logicalDirectory(), 1L, Long::sum);
+            for (var entry : counts.entrySet()) {
+                ensureDirectory(connection, entry.getKey());
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE directory_quotas SET current_count=?, updated_at_ms=?, row_version=row_version+1 WHERE logical_directory=?")) {
+                    update.setLong(1, entry.getValue());
+                    update.setLong(2, now);
+                    update.setString(3, entry.getKey());
+                    update.executeUpdate();
+                }
+            }
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE tenant_quota SET current_count=?, updated_at_ms=?, row_version=row_version+1 WHERE singleton_id=1")) {
+                update.setLong(1, files.size());
+                update.setLong(2, now);
+                update.executeUpdate();
+            }
             return null;
         });
     }

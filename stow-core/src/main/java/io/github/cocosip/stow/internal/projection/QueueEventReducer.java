@@ -22,6 +22,18 @@ public final class QueueEventReducer {
     }
 
     public void apply(QueueEventRecord event) {
+        apply(event, true);
+    }
+
+    public void applyMetadataOnly(QueueEventRecord event) {
+        apply(event, false);
+    }
+
+    public void resetMetadata(String tenantId) {
+        metadata.clear(tenantId);
+    }
+
+    private void apply(QueueEventRecord event, boolean applyQuota) {
         metadata.write(event.tenantId(), connection -> {
             boolean fresh = SqliteMetadataProjectionStore.markApplied(connection, event, metadata.nowMillis());
             if (fresh) {
@@ -31,6 +43,7 @@ public final class QueueEventReducer {
         });
         // The two SQLite databases cannot share a transaction. Re-running the quota side effect
         // after a metadata duplicate is intentional and completes a previously interrupted batch.
+        if (!applyQuota) return;
         if (event.eventType() == QueueEventType.ACCEPTED) {
             Optional<QuotaReservation> reservation = quota.reservation(event.tenantId(), event.fileKey());
             quota.consume(
