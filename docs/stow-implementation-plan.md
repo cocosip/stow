@@ -283,12 +283,12 @@ benchmarks/**
 
 **Interfaces:** Implements watcher manager/options/auto-manager APIs and imports through StoragePool only.
 
-- [ ] Write tests for configuration persistence, register/update/remove/enable/disable, single/multi-tenant mapping and root discovery.
-- [ ] Write scan tests for glob, recursion, size/age/stability, bounded concurrency and DELETE/MOVE/KEEP.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement polling scans on virtual threads, atomic configuration/history persistence, debounce and prune throttle.
-- [ ] Inject post-action failure after successful import; prove history prevents duplicate import and next scan retries only the post-action.
-- [ ] Commit: `✨ feat(watcher): add persistent directory imports`
+- [x] Write tests for configuration persistence, register/update/remove/enable/disable, single/multi-tenant mapping and root discovery.
+- [x] Write scan tests for glob, recursion, size/age/stability, bounded concurrency and DELETE/MOVE/KEEP.
+- [x] Run focused tests; expect failure.
+- [x] Implement polling scans on virtual threads, atomic configuration/history persistence, debounce and prune throttle.
+- [x] Inject post-action failure after successful import; prove history prevents duplicate import and next scan retries only the post-action.
+- [x] Commit: `✨ feat(watcher): add persistent directory imports`
 
 ### Task 15: Statistics, diagnostics, background scheduling, and health
 
