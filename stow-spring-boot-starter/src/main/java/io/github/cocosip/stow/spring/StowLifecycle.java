@@ -1,5 +1,6 @@
 package io.github.cocosip.stow.spring;
 
+import io.github.cocosip.stow.RuntimeState;
 import io.github.cocosip.stow.StowRuntime;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -19,7 +20,12 @@ public final class StowLifecycle implements SmartLifecycle {
     public void start() {
         if (running.compareAndSet(false, true)) {
             try {
-                runtime.start();
+                RuntimeState state = runtime.state();
+                if (state == RuntimeState.NEW) {
+                    runtime.start();
+                } else if (state != RuntimeState.RUNNING) {
+                    throw new IllegalStateException("Stow runtime cannot be started from " + state + " state");
+                }
             } catch (RuntimeException | Error failure) {
                 running.set(false);
                 throw failure;

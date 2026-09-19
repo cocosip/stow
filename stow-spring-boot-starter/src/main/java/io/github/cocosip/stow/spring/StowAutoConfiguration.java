@@ -44,6 +44,11 @@ public class StowAutoConfiguration {
     }
 
     @Bean
+    static StowRuntimeStartup stowRuntimeStartup() {
+        return new StowRuntimeStartup();
+    }
+
+    @Bean
     StowLifecycle stowLifecycle(StowRuntime runtime) {
         return new StowLifecycle(runtime);
     }

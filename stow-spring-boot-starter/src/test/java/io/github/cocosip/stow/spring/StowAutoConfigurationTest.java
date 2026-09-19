@@ -3,6 +3,7 @@ package io.github.cocosip.stow.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.cocosip.stow.StowRuntime;
+import io.github.cocosip.stow.api.TenantManager;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
@@ -48,6 +49,28 @@ class StowAutoConfigurationTest {
             assertThat(context).doesNotHaveBean("defaultStowRuntimeFactory");
             assertThat(context.getBean(StowRuntime.class).state().name()).isEqualTo("RUNNING");
         });
+    }
+
+    @Test
+    void supportsConstructorInjectionOfPublicServices() {
+        contextRunner
+                .withUserConfiguration(PublicServiceConsumerConfiguration.class)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(PublicServiceConsumer.class);
+                    assertThat(context.getBean(PublicServiceConsumer.class)
+                                    .runtime()
+                                    .state()
+                                    .name())
+                            .isEqualTo("RUNNING");
+                    assertThat(context.getBean(PublicServiceConsumer.class).tenantManager())
+                            .isNotNull();
+                    assertThat(context.getBean(SecondPublicServiceConsumer.class)
+                                    .runtime())
+                            .isSameAs(
+                                    context.getBean(PublicServiceConsumer.class).runtime())
+                            .isSameAs(context.getBean(StowRuntime.class));
+                });
     }
 
     @Test
@@ -160,4 +183,22 @@ class StowAutoConfigurationTest {
             return new SimpleMeterRegistry();
         }
     }
+
+    @Configuration(proxyBeanMethods = false)
+    static class PublicServiceConsumerConfiguration {
+
+        @Bean
+        PublicServiceConsumer publicServiceConsumer(StowRuntime runtime, TenantManager tenantManager) {
+            return new PublicServiceConsumer(runtime, tenantManager);
+        }
+
+        @Bean
+        SecondPublicServiceConsumer secondPublicServiceConsumer(StowRuntime runtime) {
+            return new SecondPublicServiceConsumer(runtime);
+        }
+    }
+
+    record PublicServiceConsumer(StowRuntime runtime, TenantManager tenantManager) {}
+
+    record SecondPublicServiceConsumer(StowRuntime runtime) {}
 }
