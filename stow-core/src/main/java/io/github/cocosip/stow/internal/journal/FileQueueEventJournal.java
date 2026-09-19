@@ -271,6 +271,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             directories.filter(Files::isDirectory).forEach(directory -> {
                 String tenantId = directory.getFileName().toString();
                 try {
+                    cleanupCompactionArtifacts(directory);
                     JournalCodec tenantCodec = codecFor(directory);
                     JournalScanner.Result result =
                             new JournalScanner().scan(directory.resolve("queue.log"), tenantCodec, true);
@@ -292,6 +293,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         return tenants.computeIfAbsent(tenantId, id -> {
             Path directory = queueDirectory.resolve(id);
             try {
+                cleanupCompactionArtifacts(directory);
                 JournalCodec tenantCodec = codecFor(directory);
                 JournalScanner.Result result =
                         new JournalScanner().scan(directory.resolve("queue.log"), tenantCodec, false);
@@ -345,11 +347,38 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                                 record.nextOffset() + tenant.baseOffset,
                                 record.event()))
                         .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            } else if (state != null && isCompactionReplacement(state, result)) {
+                tenant.baseOffset = state.tailOffset() - result.physicalLength();
+                tenant.tailOffset = state.tailOffset();
+                tenant.repairCount = state.repairCount();
+                tenant.records = result.records().stream()
+                        .map(record -> new JournalScanner.Record(
+                                record.offset() + tenant.baseOffset,
+                                record.nextOffset() + tenant.baseOffset,
+                                record.event()))
+                        .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+                persistState(tenant, false, -1);
             }
         } catch (IOException | RuntimeException ignored) {
             // State is an acceleration file; the physical log remains authoritative.
         }
         return tenant;
+    }
+
+    private static boolean isCompactionReplacement(JournalStateStore.State state, JournalScanner.Result result) {
+        long previousPhysicalLength = state.tailOffset() - state.baseOffset();
+        if (result.physicalLength() >= previousPhysicalLength || state.tailOffset() < state.baseOffset()) {
+            return false;
+        }
+        if (result.records().isEmpty()) {
+            return result.physicalLength() == 0 && state.lastSequenceNumber() > 0;
+        }
+        return result.lastSequenceNumber() == state.lastSequenceNumber()
+                && result.records().get(0).event().sequenceNumber() > 1;
+    }
+
+    private static void cleanupCompactionArtifacts(Path directory) throws IOException {
+        Files.deleteIfExists(directory.resolve(".queue.log.compact.tmp"));
     }
 
     private void ensureWriter(TenantLog tenant) {

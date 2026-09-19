@@ -31,6 +31,7 @@ public final class ProjectionSnapshotStore {
             .addModule(new JavaTimeModule())
             .addModule(new Jdk8Module())
             .configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true)
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .defaultPropertyInclusion(
                     JsonInclude.Value.construct(JsonInclude.Include.NON_NULL, JsonInclude.Include.ALWAYS))
             .build();

@@ -131,6 +131,57 @@ class FileQueueEventJournalTest {
         }
     }
 
+    @Test
+    void removesAbandonedCompactionTempWithoutChangingTheJournal() throws Exception {
+        Path root = Files.createTempDirectory("stow-journal-compact-temp");
+        JournalConfiguration configuration = configuration(JournalAckMode.DURABLE, 8);
+        Path tenantDirectory = root.resolve("tenant-a");
+        try (FileQueueEventJournal journal =
+                new FileQueueEventJournal(root, configuration, new BinaryV1JournalCodec())) {
+            journal.append(event("tenant-a", 1));
+            journal.append(event("tenant-a", 2));
+        }
+
+        Path abandoned = tenantDirectory.resolve(".queue.log.compact.tmp");
+        Files.write(abandoned, new byte[] {1, 2, 3});
+        try (FileQueueEventJournal journal =
+                new FileQueueEventJournal(root, configuration, new BinaryV1JournalCodec())) {
+            assertThat(journal.readBatch("tenant-a", 0, 10).events())
+                    .extracting(QueueEventRecord::sequenceNumber)
+                    .containsExactly(1L, 2L);
+            assertThat(abandoned).doesNotExist();
+        }
+    }
+
+    @Test
+    void recoversLogicalBaseWhenCrashOccursAfterLogReplaceBeforeStateReplace() throws Exception {
+        Path root = Files.createTempDirectory("stow-journal-compact-recovery");
+        JournalConfiguration configuration = configuration(JournalAckMode.DURABLE, 8);
+        long firstEnd;
+        long tail;
+        try (FileQueueEventJournal journal =
+                new FileQueueEventJournal(root, configuration, new BinaryV1JournalCodec())) {
+            journal.append(event("tenant-a", 1));
+            journal.append(event("tenant-a", 2));
+            journal.append(event("tenant-a", 3));
+            firstEnd = journal.readBatch("tenant-a", 0, 1).nextOffset();
+            tail = journal.tailOffset("tenant-a");
+        }
+
+        Path log = root.resolve("tenant-a").resolve("queue.log");
+        byte[] original = Files.readAllBytes(log);
+        Files.write(log, java.util.Arrays.copyOfRange(original, Math.toIntExact(firstEnd), original.length));
+
+        try (FileQueueEventJournal journal =
+                new FileQueueEventJournal(root, configuration, new BinaryV1JournalCodec())) {
+            assertThat(journal.baseOffset("tenant-a")).isEqualTo(firstEnd);
+            assertThat(journal.tailOffset("tenant-a")).isEqualTo(tail);
+            assertThat(journal.readBatch("tenant-a", firstEnd, 10).events())
+                    .extracting(QueueEventRecord::sequenceNumber)
+                    .containsExactly(2L, 3L);
+        }
+    }
+
     private static JournalConfiguration configuration(JournalAckMode mode) {
         return configuration(mode, 8);
     }

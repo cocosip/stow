@@ -252,12 +252,12 @@ benchmarks/**
 
 **Interfaces:** Implements QueueProjectionMaintenance and database maintenance results.
 
-- [ ] Write deterministic snapshot/CRC tests and reject out-of-range snapshot offsets.
-- [ ] Write compaction crash tests before/after temp force, log replace and state replace.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement catch-up gating, snapshot verification, exclusive compaction and snapshot+tail rebuild.
-- [ ] Corrupt metadata.db and quotas.db separately; prove metadata rebuilds from journal and quota rebuilds from active metadata.
-- [ ] Commit: `✨ feat(recovery): add projection and database rebuilds`
+- [x] Write deterministic snapshot/CRC tests and reject out-of-range snapshot offsets.
+- [x] Write compaction crash tests before/after temp force, log replace and state replace.
+- [x] Run focused tests; expect failure.
+- [x] Implement catch-up gating, snapshot verification, exclusive compaction and snapshot+tail rebuild.
+- [x] Corrupt metadata.db and quotas.db separately; prove metadata rebuilds from journal and quota rebuilds from active metadata.
+- [x] Commit: `✨ feat(recovery): add projection and database rebuilds` (`da6951f`)
 
 ### Task 13: Cleanup, two-phase delete, dead letter, and orphan recovery
 

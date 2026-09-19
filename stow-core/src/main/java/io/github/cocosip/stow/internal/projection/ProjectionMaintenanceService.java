@@ -81,6 +81,9 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
         if (state.projectedOffset() != state.tailOffset())
             throw new IllegalStateException("projector must be caught up before compaction");
         ProjectionSnapshotStore.Snapshot snapshot = snapshots.load(tenantId);
+        if (snapshot != null && snapshot.baseOffset() != state.baseOffset()) {
+            throw new IllegalStateException("snapshot base does not match journal base");
+        }
         if (snapshot == null || snapshot.nextOffset() != state.tailOffset()) snapshot(tenantId);
         journal.compact(tenantId, state.tailOffset());
     }
