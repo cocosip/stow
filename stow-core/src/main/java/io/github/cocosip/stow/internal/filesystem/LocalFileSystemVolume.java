@@ -100,6 +100,8 @@ final class LocalFileSystemVolume implements StorageVolume {
         try {
             validateTarget(result, false);
             return result;
+        } catch (UnsafeStoragePathException exception) {
+            throw new IllegalArgumentException(exception.getMessage(), exception);
         } catch (IOException exception) {
             throw unavailable("Unable to validate storage path", exception);
         }
@@ -318,13 +320,9 @@ final class LocalFileSystemVolume implements StorageVolume {
             }
             validateNormalDirectory(current, "Storage volume mount path");
         }
-        Path realPath = current.toRealPath();
-        if (!samePath(mountPath, realPath)) {
-            throw new IOException("Storage volume mount path must not use symbolic links or reparse points");
-        }
         BasicFileAttributes attributes =
-                Files.readAttributes(realPath, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        return new MountIdentity(realPath, attributes.fileKey());
+                Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        return new MountIdentity(current, attributes.fileKey());
     }
 
     private void ensureMountValid() throws IOException {
@@ -336,11 +334,9 @@ final class LocalFileSystemVolume implements StorageVolume {
             current = current.resolve(component);
             validateNormalDirectory(current, "Storage volume mount path");
         }
-        Path currentRealPath = current.toRealPath();
         BasicFileAttributes attributes =
-                Files.readAttributes(currentRealPath, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (!samePath(realMountPath, currentRealPath)
-                || (mountFileKey != null && !mountFileKey.equals(attributes.fileKey()))) {
+                Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        if (!samePath(realMountPath, current) || (mountFileKey != null && !mountFileKey.equals(attributes.fileKey()))) {
             throw new IOException("Storage volume mount path identity changed");
         }
     }
@@ -362,8 +358,11 @@ final class LocalFileSystemVolume implements StorageVolume {
                     // Another writer created the directory; validate it below.
                 }
             }
-            if (!Files.isDirectory(current, LinkOption.NOFOLLOW_LINKS) || isLink(current)) {
-                throw new IOException("Storage directory must not use symbolic links or reparse points");
+            if (isLink(current)) {
+                throw new UnsafeStoragePathException("Storage directory must not use symbolic links or reparse points");
+            }
+            if (!Files.isDirectory(current, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Storage directory must be a directory");
             }
         }
     }
@@ -489,15 +488,19 @@ final class LocalFileSystemVolume implements StorageVolume {
                 && TEMPORARY_FILE_NAME.matcher(fileName.toString()).matches();
     }
 
-    private static boolean samePath(Path left, Path right) {
-        if (System.getProperty("os.name").startsWith("Windows")) {
-            return left.toString().equalsIgnoreCase(right.toString());
-        }
-        return left.equals(right);
+    private static boolean samePath(Path left, Path right) throws IOException {
+        return Files.isSameFile(left, right);
     }
 
     private static StorageVolumeUnavailableException unavailable(String message, IOException cause) {
         return new StorageVolumeUnavailableException(message, cause);
+    }
+
+    private static final class UnsafeStoragePathException extends IOException {
+
+        private UnsafeStoragePathException(String message) {
+            super(message);
+        }
     }
 
     private record MountIdentity(Path realPath, Object fileKey) {}

@@ -109,11 +109,10 @@ public final class SqliteConnectionFactory {
                     validateNormalDirectory(tenantDirectory, "Tenant database directory");
                 }
             }
-            Path realTenantDirectory = tenantDirectory.toRealPath();
-            if (!realTenantDirectory.startsWith(realRoot)) {
+            if (!tenantDirectory.startsWith(realRoot)) {
                 throw new SQLException("Tenant database directory escapes its configured root");
             }
-            return realTenantDirectory;
+            return tenantDirectory;
         } catch (IOException exception) {
             throw new SQLException("Unable to create or validate tenant database directory", exception);
         }
@@ -136,11 +135,7 @@ public final class SqliteConnectionFactory {
                 }
             }
         }
-        Path realRoot = current.toRealPath();
-        if (!samePath(rootDirectory, realRoot)) {
-            throw new SQLException("Configured SQLite root must not be a symbolic link or reparse point");
-        }
-        return realRoot;
+        return current;
     }
 
     private static void validateNormalDirectory(Path directory, String description) throws IOException, SQLException {
@@ -149,13 +144,6 @@ public final class SqliteConnectionFactory {
         if (!attributes.isDirectory() || attributes.isSymbolicLink() || attributes.isOther()) {
             throw new SQLException(description + " must be a normal directory, not a symbolic link or reparse point");
         }
-    }
-
-    private static boolean samePath(Path left, Path right) {
-        if (System.getProperty("os.name").startsWith("Windows")) {
-            return left.toString().equalsIgnoreCase(right.toString());
-        }
-        return left.equals(right);
     }
 
     private void applyPragmas(Connection connection) throws SQLException {
