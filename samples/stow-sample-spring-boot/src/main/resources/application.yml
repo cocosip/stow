@@ -1,0 +1,14 @@
+stow:
+  paths:
+    metadata-directory: ./sample-data/metadata
+    quota-directory: ./sample-data/quota
+    queue-directory: ./sample-data/queue
+    watcher-directory: ./sample-data/watchers
+  tenant:
+    auto-create-tenants: true
+  volumes:
+    - id: primary
+      mount-path: ./sample-data/volume
+      sharding-depth: 2
+      buffer-size: 65536
+      force-flush-after-write: true
