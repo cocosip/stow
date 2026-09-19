@@ -316,12 +316,12 @@ benchmarks/**
 
 **Interfaces:** Converts `stow.*` properties into core configuration, owns one runtime Bean and forwards public service Beans.
 
-- [ ] Write ApplicationContextRunner tests for defaults, invalid properties, user Clock override, disabled Actuator/Micrometer and clean shutdown.
-- [ ] Run focused starter tests; expect failure.
-- [ ] Implement auto-configuration without registering internal core components as Beans and without adding a logging Provider.
-- [ ] Add compatibility test executions against the lowest Spring Boot 3.5 line and current 4.x line.
+- [x] Write ApplicationContextRunner tests for defaults, invalid properties, user Clock override, disabled Actuator/Micrometer and clean shutdown.
+- [x] Run focused starter tests; expect failure.
+- [x] Implement auto-configuration without registering internal core components as Beans and without adding a logging Provider.
+- [x] Add compatibility test executions against the lowest Spring Boot 3.5 line and current 4.x line.
 - [ ] Run `mvnw -pl stow-spring-boot-starter -am verify`; expect pass.
-- [ ] Commit: `✨ feat(spring): add Boot lifecycle adapter`
+- [x] Commit: `✨ feat(spring): add Boot lifecycle adapter`
 
 ### Task 17: Samples, configuration reference, and Javadocs
 
