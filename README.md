@@ -1,34 +1,39 @@
 # Stow
 
-Stow 是面向 Java 21 的高并发、多租户文件存储池。它以本地文件系统或操作系统已挂载的文件系统为物理存储，围绕文件放置、租户隔离、持久化队列、配额、恢复和运行维护提供统一的 Java API，并通过独立模块适配 Spring Boot。
+Stow is a Java 21, multi-tenant file storage pool for local filesystems and
+mounted filesystems. It provides durable file placement, tenant isolation,
+processing leases, quotas, recovery, maintenance, and a framework-neutral API.
+Spring Boot integration is provided by a separate starter module.
 
-## 主要能力
+The project is currently versioned as `0.1.0-SNAPSHOT`. Stable architecture,
+API, persistence, operations, and release guidance is collected in the
+[`docs/`](docs/) documentation index.
 
-- 多租户隔离：租户元数据、队列、配额和文件路径相互隔离。
-- 多存储卷：支持卷健康与容量探测、分片路径和候选卷选择。
-- 持久化处理：以 journal 保存队列事实，以 SQLite 构建查询投影。
-- 崩溃恢复：通过原子文件更新、幂等事件和恢复流程保护磁盘状态。
-- 框架无关核心：`stow-core` 不依赖 Spring、CDI、Guice 或具体日志实现。
-- 明确的资源所有权：运行时只关闭自身创建的资源，调用方注入的执行器仍由调用方管理。
+## Features
 
-Stow 的核心架构把物理文件、每租户 journal 和 SQLite 投影分别作为内容事实、队列事实和查询视图。完整设计与持久化约束见[总体设计](docs/stow-design.md)和[持久化与恢复契约](docs/stow-persistence-contract.md)。
+- Durable writes to one or more sharded storage volumes.
+- Tenant-scoped metadata, queues, quotas, and physical paths.
+- Append-only queue journals with SQLite projections that can be rebuilt.
+- Claim, complete, fail, retry, timeout, cleanup, and orphan recovery flows.
+- Persistent directory watchers and automatic import management.
+- Runtime health, statistics, maintenance, and Spring Boot Actuator adapters.
+- A core module that depends on the SLF4J 2 API, not on a logging framework.
 
-## 环境要求
+Stow is not an object-storage client and does not allow callers to choose an
+arbitrary physical path. NFS, SMB, PVC, and similar systems can be used after
+they are mounted by the operating system.
+
+## Requirements
 
 - OpenJDK 21
-- Maven 3.9+
+- Maven 3.9 or newer
 
-仓库包含 Maven Wrapper，不需要额外在仓库内安装 Maven。Windows 使用 `mvnw.cmd`，Linux 和 macOS 使用 `mvnw`。
+The repository includes Maven Wrapper scripts. Use `mvnw.cmd` on Windows and
+`./mvnw` on Linux or macOS.
 
-## 引入依赖
+## Dependency
 
-当前开发版本为 `0.1.0-SNAPSHOT`。在仓库根目录执行一次本地安装：
-
-```powershell
-.\mvnw.cmd install
-```
-
-然后在 Maven 项目中引用核心模块：
+The core dependency is framework-neutral:
 
 ```xml
 <dependency>
@@ -38,18 +43,43 @@ Stow 的核心架构把物理文件、每租户 journal 和 SQLite 投影分别�
 </dependency>
 ```
 
-`stow-core` 只依赖 SLF4J API，应用程序可以自行选择兼容的日志实现。
+For Spring Boot applications use the starter instead:
 
-## Java 使用
+```xml
+<dependency>
+  <groupId>io.github.cocosip</groupId>
+  <artifactId>stow-spring-boot-starter</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
 
-以下示例创建配置、启动运行时并读取预配置租户。`StowRuntime` 实现了 `AutoCloseable`，推荐始终使用 try-with-resources：
+Install the current checkout into the local Maven repository before consuming
+the snapshot from another project:
+
+```bash
+./mvnw install
+```
+
+`stow-core` exposes `slf4j-api` 2.x only. Applications must select one
+provider, for example `slf4j-simple`, Logback, or Log4j2. The core module does
+not install a provider and therefore does not decide how application logs are
+formatted or routed.
+
+## Quick Start: Write and Read
+
+The following is a complete framework-neutral operation. A file is written,
+claimed and completed, read back, and then read again after a runtime restart.
 
 ```java
 import io.github.cocosip.stow.Stow;
 import io.github.cocosip.stow.StowRuntime;
+import io.github.cocosip.stow.api.ContentSources;
 import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.config.VolumeConfiguration;
 import io.github.cocosip.stow.model.TenantContext;
+import io.github.cocosip.stow.model.WriteOptions;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -59,110 +89,233 @@ StowConfiguration configuration = StowConfiguration.builder()
         .queueDirectory(Path.of("data/queue"))
         .watcherDirectory(Path.of("data/watchers"))
         .autoCreateTenants(true)
-        .preconfiguredTenants(List.of("tenant-a"))
         .volumes(List.of(new VolumeConfiguration(
-                "volume-1",
-                Path.of("data/volume-1"),
-                2,
-                64 * 1024,
-                true)))
+                "primary", Path.of("data/volume"), 2, 65_536, true)))
         .build();
 
+String fileKey;
 try (StowRuntime runtime = Stow.open(configuration)) {
     TenantContext tenant = runtime.tenantManager().get("tenant-a");
-    System.out.println(tenant.tenantId());
+    fileKey = runtime.storagePool().write(
+            tenant,
+            ContentSources.of("hello from Stow".getBytes(StandardCharsets.UTF_8)),
+            WriteOptions.ofOriginalFileName("hello.txt"));
+
+    var claimed = runtime.storagePool().claimNext(tenant).orElseThrow();
+    runtime.storagePool().complete(claimed.lease());
+
+    try (InputStream input = runtime.storagePool().read(tenant, fileKey)) {
+        String content = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        System.out.println(content);
+    }
+}
+
+try (StowRuntime reopened = Stow.open(configuration)) {
+    TenantContext tenant = reopened.tenantManager().get("tenant-a");
+    try (InputStream input = reopened.storagePool().read(tenant, fileKey)) {
+        System.out.println(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+    }
 }
 ```
 
-当前版本会校验卷配置，底层本地文件系统卷也已实现；完整 `StoragePool` 组合仍按[实现计划](docs/stow-implementation-plan.md)接入，因此上例只使用当前已接入运行时的租户 API。
+`Stow.open` starts the runtime. `StowRuntime` is `AutoCloseable`, so
+try-with-resources releases the runtime lock, background services, journal
+writers, database connections, and storage volumes. A caller that uses
+`Stow.builder()` instead of `Stow.open()` must call `start()` explicitly.
 
-## 配置
+## Configuration
 
-`StowConfiguration.builder()` 是框架无关的配置入口。常用配置包括：
+The framework-neutral entry point is `StowConfiguration.builder()`. Paths are
+converted to absolute normalized paths during validation.
 
-| 分组 | 配置 | 说明 |
+| Area | Builder method | Meaning |
 | --- | --- | --- |
-| 路径 | `metadataDirectory` | 租户元数据与运行时锁目录，默认 `./stow-metadata` |
-| 路径 | `quotaDirectory` | 配额数据目录，默认 `./stow-quota` |
-| 路径 | `queueDirectory` | 持久化队列目录，默认 `./stow-queue` |
-| 路径 | `watcherDirectory` | 文件监视状态目录，默认 `./stow-watchers` |
-| 租户 | `autoCreateTenants` | 是否在首次访问时自动创建租户，默认关闭 |
-| 租户 | `defaultQuota` | 新租户默认配额；`0` 表示不限制 |
-| 租户 | `preconfiguredTenants` | 运行时启动时确保存在的租户列表 |
-| 存储卷 | `volumes` | 一个或多个 `VolumeConfiguration` |
+| Metadata | `metadataDirectory(Path)` | Tenant metadata and runtime lock |
+| Quota | `quotaDirectory(Path)` | SQLite quota databases |
+| Queue | `queueDirectory(Path)` | Per-tenant journals and projection state |
+| Watchers | `watcherDirectory(Path)` | Watcher configuration and import history |
+| Tenants | `autoCreateTenants(boolean)` | Create a tenant on first lookup |
+| Tenants | `defaultQuota(long)` | Default file-count quota; `0` means unlimited |
+| Tenants | `preconfiguredTenants(List<String>)` | Tenants ensured during startup |
+| Volumes | `volumes(List<VolumeConfiguration>)` | Ordered physical storage volumes |
+| Persistence | `backgroundPersistence`, `journalAckMode`, `journalFormat` | Journal durability and encoding |
+| Projection | `journalProjectionEnabled`, `projection*` | SQLite projection scheduling |
+| Recovery | `snapshot*`, `compaction*`, `orphanRecovery*` | Replay and recovery behavior |
+| Cleanup | `cleanup*`, `processingTimeout`, `completedRetention` | Retention and maintenance |
+| Statistics | `statistics*` | Windowed runtime measurements |
 
-单个卷配置包含：
+Each `VolumeConfiguration` contains an id, mount path, sharding depth from `0`
+to `3`, a positive buffer size, and the `forceFlushAfterWrite` flag. The full
+property list, defaults, validation rules, and Spring Boot names are in
+[`docs/configuration-reference.md`](docs/configuration-reference.md).
 
-- `id`：非空卷标识。
-- `mountPath`：卷挂载目录。
-- `shardingDepth`：文件路径分片深度，范围为 `0..3`。
-- `bufferSize`：I/O 缓冲区大小，必须为正数。
-- `forceFlushAfterWrite`：原子提交前是否强制刷新文件内容。
+## Public API
 
-所有路径都会在构建配置时转换为绝对规范路径。完整配置项、默认值和校验规则见[公共 API 与配置契约](docs/stow-api-contract.md)。
+The main services are exposed by `StowRuntime`:
 
-## 生命周期与资源所有权
+| Service | Typical operations |
+| --- | --- |
+| `StoragePool` | `write`, `read`, `findFileInfo`, `findFileLocation`, `status`, `totalCapacity` |
+| `TenantManager` | Create, find, enable, disable, and list tenants |
+| `TenantQuotaManager` | Read and change tenant file-count limits |
+| `DirectoryQuotaManager` | Read and change logical-directory limits |
+| `QueueProjectionMaintenance` | Replay, snapshot, compact, and rebuild projections |
+| `StorageMaintenance` | Cleanup, dead-letter handling, and orphan recovery |
+| `FileWatcherManager` | Register, update, enable, disable, scan, and remove watchers |
+| `StatisticsReader` | Query operation counters and latency windows |
+| `health()` | Aggregate component health for diagnostics |
 
-- `Stow.open(configuration)` 等价于构建运行时并立即调用 `start()`。
-- `Stow.builder().build()` 返回 `NEW` 状态，适合需要先完成依赖注入再显式启动的场景。
-- 同一组运行时目录同一时间只能由一个 Stow 实例持有。
-- Stow 会关闭自己创建的工作执行器、调度器和后台服务。
-- 通过 builder 注入的执行器和调度器由调用方负责关闭。
-- `close()` 可以重复调用；业务代码应优先使用 try-with-resources 保证释放目录锁和内部资源。
+`write` returns a generated `fileKey`. The returned key is the stable handle
+for `read`, metadata lookup, location lookup, and status lookup. Queue workers
+call `claimNext` or `claimBatch`, then pass the exact `ProcessingLease` to
+`complete` or `fail`; a stale or mismatched lease is rejected.
 
-## 构建与验证
+## Spring Boot
 
-Windows：
+The starter binds `stow.*` properties, creates the `StowRuntime` bean, manages
+its lifecycle, and contributes Actuator health and Micrometer meters when the
+corresponding Spring Boot dependencies are present.
 
-```powershell
-.\mvnw.cmd verify
+```yaml
+stow:
+  paths:
+    metadata-directory: ./data/metadata
+    quota-directory: ./data/quota
+    queue-directory: ./data/queue
+    watcher-directory: ./data/watchers
+  tenant:
+    auto-create-tenants: true
+  volumes:
+    - id: primary
+      mount-path: ./data/volume
+      sharding-depth: 2
+      buffer-size: 65536
+      force-flush-after-write: true
 ```
 
-Linux 或 macOS：
+Inject `StowRuntime`, `StoragePool`, or `TenantManager` into a Spring bean and
+use the same API shown above. The starter does not expose internal
+implementation classes.
+
+## Runnable Examples
+
+The console sample is a dedicated write/read program. It writes and completes
+one file, reads it immediately, closes the runtime, reopens the same data
+directories, and reads the file again.
+
+```bash
+./mvnw -pl samples/stow-sample-console -am -DskipTests install
+./mvnw -pl samples/stow-sample-console exec:java \
+  -Dexec.mainClass=io.github.cocosip.stow.sample.ConsoleSampleApplication \
+  -Dexec.args=sample-data
+```
+
+Windows:
+
+```powershell
+.\mvnw.cmd -pl samples/stow-sample-console -am -DskipTests install
+.\mvnw.cmd -pl samples/stow-sample-console exec:java `
+  "-Dexec.mainClass=io.github.cocosip.stow.sample.ConsoleSampleApplication" `
+  "-Dexec.args=sample-data"
+```
+
+The Spring Boot sample uses the starter and can be started with
+`spring-boot:run` after the reactor has been built:
+
+```bash
+./mvnw -pl samples/stow-sample-spring-boot -am spring-boot:run
+```
+
+The samples exercise write, claim, complete, close, reopen, and read behavior
+when run manually in a module-local data directory. Sample modules intentionally
+do not contain unit tests; automated coverage belongs to the core and starter
+modules.
+
+## Benchmark Baseline
+
+Run the JMH runner with:
+
+```bash
+./mvnw -Pbenchmarks -pl benchmarks -am package
+java -jar benchmarks/target/stow-benchmarks-0.1.0-SNAPSHOT-runner.jar \
+  'io.github.cocosip.stow.benchmarks.StoragePoolBenchmark.*' \
+  -wi 1 -i 2 -f 1 -rff benchmarks/results/storage-pool.json -rf json
+```
+
+The following baseline was measured on 2026-09-19 on Windows 11 x64 with
+OpenJDK 21.0.12.1, one thread, one fork, a 1 KiB payload, one warmup
+iteration, and two measurement iterations:
+
+| Benchmark | Throughput |
+| --- | ---: |
+| `StoragePoolBenchmark.read` | 139.735 ops/s |
+| `StoragePoolBenchmark.write` | 0.922 ops/s |
+| `StoragePoolBenchmark.writeClaimComplete` | 0.493 ops/s |
+
+These values are an execution record for this machine and configuration, not
+a portability or performance guarantee. Compare future runs only when the
+JDK, filesystem, payload, JMH parameters, and host conditions are recorded as
+well. Generated JSON results stay under the ignored `benchmarks/results/`
+directory.
+
+## Build and Test
+
+Run the complete local verification build with:
 
 ```bash
 ./mvnw verify
+./mvnw -Pslf4j1-compat verify
+./mvnw -Pspring-boot-compat verify
+./mvnw -Pbenchmarks -pl benchmarks -am package
 ```
 
-只验证核心模块：
+The compatibility profiles are build checks; normal applications should use
+SLF4J 2.x. `spotless`, `spotbugs`, JaCoCo, unit tests, and Javadoc packaging
+are part of the Maven lifecycle.
 
-```powershell
-.\mvnw.cmd -pl stow-core clean verify
-```
+## GitHub Actions and Release
 
-`verify` 会执行单元测试、集成测试阶段、JaCoCo 报告、Spotless 和 SpotBugs。部分符号链接安全测试在 Windows 账户没有创建符号链接权限时会按环境条件跳过。
+The `master` workflow runs on pushes and pull requests targeting `master`.
+It tests Linux and Windows with JDK 21 and runs the Maven verification build.
+It does not publish artifacts.
 
-## 模块
+Version tags matching `v*` run the same verification on Linux and then deploy
+the two release modules to Sonatype Central Portal. The tag `v1.0.0` publishes
+version `1.0.0`; the leading `v` is removed before passing `revision` to
+Maven. Samples and benchmarks have `maven.deploy.skip=true` and are never
+published.
 
-| 模块 | 用途 |
+Configure these repository secrets before creating a release tag:
+
+- `MAVEN_CENTRAL_USERNAME`: Central Portal user token username.
+- `MAVEN_CENTRAL_TOKEN`: Central Portal user token password.
+- `MAVEN_GPG_PRIVATE_KEY`: ASCII-armored signing key.
+- `MAVEN_GPG_PASSPHRASE`: signing key passphrase.
+
+The workflow and the release profile use the Maven server id `central`. No
+credentials are stored in the repository.
+
+## Modules
+
+| Module | Purpose |
 | --- | --- |
-| `stow-core` | 框架无关的公共 API、SPI 和核心实现 |
-| `stow-spring-boot-starter` | Spring Boot 配置绑定与生命周期适配 |
-| `samples/stow-sample-console` | 控制台集成示例 |
-| `samples/stow-sample-spring-boot` | Spring Boot 集成示例 |
-| `benchmarks` | JMH 性能基准 |
+| `stow-core` | Public API, SPI, persistence, scheduling, recovery, and storage |
+| `stow-spring-boot-starter` | Spring Boot configuration, lifecycle, Actuator, and metrics |
+| `samples/stow-sample-console` | Framework-neutral runnable read/write example |
+| `samples/stow-sample-spring-boot` | Spring Boot runnable integration example |
+| `benchmarks` | JMH baseline runner; not a published artifact |
 
-正式发布制品只有 `io.github.cocosip:stow-core` 和 `io.github.cocosip:stow-spring-boot-starter`；samples 与 benchmarks 不参与发布。Starter、samples 和 benchmarks 目前保留为后续实现的模块骨架，使用前请核对[实现计划](docs/stow-implementation-plan.md)。
+Only `io.github.cocosip:stow-core` and
+`io.github.cocosip:stow-spring-boot-starter` are release artifacts.
 
-## 版本管理
+## Documentation
 
-整个 Maven reactor 使用根 POM 中的 `${revision}` 作为统一项目版本。第三方依赖版本集中在根 POM 的 `dependencyManagement`，构建插件版本也由根构建统一管理，子模块不单独声明版本。
-
-发布或验证指定版本时只需覆盖一次 `revision`：
-
-```powershell
-.\mvnw.cmd -Drevision=1.0.0 clean verify
-```
-
-两个正式制品始终使用同一个版本号。详细约束见[构建与版本管理](docs/build-version-management.md)。
-
-## 文档
-
-- [开发文档索引](docs/README.md)
-- [总体设计](docs/stow-design.md)
-- [公共 API 与配置契约](docs/stow-api-contract.md)
-- [持久化与恢复契约](docs/stow-persistence-contract.md)
-- [构建与版本管理](docs/build-version-management.md)
-- [分阶段实现计划](docs/stow-implementation-plan.md)
-
-设计文档描述 Stow 1.0 的完整目标范围；尚未接入的能力及开发进度统一记录在实现计划中。
+- [Documentation index](docs/README.md)
+- [API and configuration contract](docs/stow-api-contract.md)
+- [Design](docs/stow-design.md)
+- [Persistence and recovery contract](docs/stow-persistence-contract.md)
+- [Configuration reference](docs/configuration-reference.md)
+- [Operations and recovery](docs/operations-and-recovery.md)
+- [Build and version management](docs/build-version-management.md)
+- [Logging](docs/logging.md)
+- [Release verification](docs/release-verification.md)
