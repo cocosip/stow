@@ -299,12 +299,12 @@ benchmarks/**
 
 **Interfaces:** Produces bounded windowed statistics, diagnostics snapshots, health aggregation and runtime-owned schedules.
 
-- [ ] Write Clock-driven tests for bucket boundaries, retention, max-series rejection, dimension switches and no-op behavior.
-- [ ] Write service-order tests for projector, timeout recovery, cleanup, orphan recovery, watcher and statistics output.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement LongAdder-based aggregation with immutable snapshots and named health components.
-- [ ] Verify no statistic or metric label contains file key, filename or physical path.
-- [ ] Commit: `✨ feat(observability): add bounded statistics and health`
+- [x] Write Clock-driven tests for bucket boundaries, retention, max-series rejection, dimension switches and no-op behavior.
+- [x] Write service-order tests for projector, timeout recovery, cleanup, orphan recovery, watcher and statistics output.
+- [x] Run focused tests; expect failure.
+- [x] Implement LongAdder-based aggregation with immutable snapshots and named health components.
+- [x] Verify no statistic or metric label contains file key, filename or physical path.
+- [x] Commit: `✨ feat(observability): add bounded statistics and health`
 
 ### Task 16: Spring Boot starter
 
