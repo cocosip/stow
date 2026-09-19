@@ -268,12 +268,12 @@ benchmarks/**
 
 **Interfaces:** Implements all StorageMaintenance operations and scheduled cleanup hooks.
 
-- [ ] Write tests for DELETE_REQUESTED/delete/DELETE_SUCCEEDED ordering, missing file idempotency and failure retry.
-- [ ] Test KEEP, DELETE, MOVE_TO_DEAD_LETTER, same-filesystem validation and event failure after move.
-- [ ] Run focused tests; expect failure.
-- [ ] Implement batched cleanup, empty/junk/backup cleanup, retired-volume policy, checkpoint/VACUUM and statistics.
-- [ ] Add orphan tests for physical file without event, event without projection, metadata without physical file and maximum scan limit.
-- [ ] Commit: `✨ feat(maintenance): complete cleanup and orphan recovery`
+- [x] Write tests for DELETE_REQUESTED/delete/DELETE_SUCCEEDED ordering, missing file idempotency and failure retry.
+- [x] Test KEEP, DELETE, MOVE_TO_DEAD_LETTER, same-filesystem validation and event failure after move.
+- [x] Run focused tests; expect failure.
+- [x] Implement batched cleanup, empty/junk/backup cleanup, retired-volume policy, checkpoint/VACUUM and statistics.
+- [x] Add orphan tests for physical file without event, event without projection, metadata without physical file and maximum scan limit.
+- [x] Commit: `✨ feat(maintenance): complete cleanup and orphan recovery`
 
 ### Task 14: Persistent file watcher subsystem
 
