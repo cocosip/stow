@@ -36,10 +36,11 @@ public final class JournalStateStore {
     }
 
     public void write(State state) throws IOException {
-        Files.createDirectories(path.getParent());
-        Path temporary = path.getParent()
-                .resolve("." + path.getFileName() + "."
-                        + UUID.randomUUID().toString().toLowerCase() + ".tmp");
+        Path parent = path.toAbsolutePath().normalize().getParent();
+        if (parent == null) throw new IOException("Journal state path has no parent: " + path);
+        Files.createDirectories(parent);
+        Path temporary = parent.resolve(
+                "." + path.getFileName() + "." + UUID.randomUUID().toString().toLowerCase() + ".tmp");
         try {
             byte[] json = mapper.writeValueAsBytes(state);
             byte[] withLf = java.util.Arrays.copyOf(json, json.length + 1);

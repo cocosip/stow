@@ -44,6 +44,9 @@ target/
 .settings/
 *.iml
 
+# Runnable sample output
+sample-data/
+
 # Generated benchmark results
 benchmarks/results/
 benchmarks/*.json

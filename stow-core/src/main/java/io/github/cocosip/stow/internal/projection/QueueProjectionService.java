@@ -1,10 +1,14 @@
 package io.github.cocosip.stow.internal.projection;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.internal.journal.JournalReadBatch;
 import io.github.cocosip.stow.model.QueueEventRecord;
 import io.github.cocosip.stow.spi.QueueEventJournal;
 import java.time.Clock;
 
+@SuppressFBWarnings(
+        value = "EI_EXPOSE_REP2",
+        justification = "The journal, reducer, cursor store, and cache are owned runtime services.")
 public final class QueueProjectionService {
 
     private final QueueEventJournal journal;

@@ -1,6 +1,7 @@
 package io.github.cocosip.stow.sample;
 
-import io.github.cocosip.stow.StowRuntime;
+import io.github.cocosip.stow.api.StoragePool;
+import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.model.ClaimedFile;
 import io.github.cocosip.stow.model.TenantContext;
 import io.github.cocosip.stow.model.WriteOptions;
@@ -29,10 +30,8 @@ public class StowSampleApplication {
     }
 
     @Bean
-    CommandLineRunner sampleOperation(StowRuntime runtime) {
+    CommandLineRunner sampleOperation(StoragePool storagePool, TenantManager tenantManager) {
         return args -> {
-            var storagePool = runtime.storagePool();
-            var tenantManager = runtime.tenantManager();
             TenantContext tenant = tenantManager.get("sample");
             String fileKey = storagePool.write(
                     tenant,

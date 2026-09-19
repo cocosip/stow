@@ -58,7 +58,7 @@ public final class WatcherScanner {
         }
         history.prune(
                 configuration.watcherId(), configuration.historyRetention(), configuration.historyFlushInterval());
-        result.discovered = candidates.size();
+        result.discovered(candidates.size());
         try (ExecutorService executor = Executors.newFixedThreadPool(
                 configuration.concurrentImports(),
                 Thread.ofVirtual().name("stow-watcher-", 0).factory())) {
@@ -72,7 +72,8 @@ public final class WatcherScanner {
                     Thread.currentThread().interrupt();
                     result.error(tenantForError(configuration), "scan", exception);
                 } catch (ExecutionException exception) {
-                    result.error(tenantForError(configuration), "import", exception.getCause());
+                    Throwable cause = exception.getCause() == null ? exception : exception.getCause();
+                    result.error(tenantForError(configuration), "import", cause);
                 }
             }
         }
@@ -114,10 +115,14 @@ public final class WatcherScanner {
                         configuration.watcherId(), source, stable.size(), stable.modifiedAtMillis(), entry.fileKey());
                 return Outcome.skippedOutcome();
             }
+            Path sourceFileName = source.getFileName();
+            if (sourceFileName == null) {
+                throw new IllegalStateException("Watcher source has no file name: " + source);
+            }
             String fileKey = storagePool.write(
                     tenant,
                     new PathContentSource(source, stable.size()),
-                    WriteOptions.ofOriginalFileName(source.getFileName().toString()));
+                    WriteOptions.ofOriginalFileName(sourceFileName.toString()));
             history.recordImported(
                     configuration.watcherId(), source, stable.size(), stable.modifiedAtMillis(), fileKey, false);
             try {
@@ -185,14 +190,18 @@ public final class WatcherScanner {
 
     private void move(WatcherConfiguration configuration, Path source) {
         Path root = configuration.watchPath().toAbsolutePath().normalize();
-        Path targetRoot = configuration.moveDirectory().toAbsolutePath().normalize();
+        Path configuredTarget = configuration.moveDirectory();
+        if (configuredTarget == null) throw new IllegalStateException("Move action requires a move directory");
+        Path targetRoot = configuredTarget.toAbsolutePath().normalize();
         Path relative = root.relativize(source.toAbsolutePath().normalize());
         Path target = targetRoot.resolve(relative).normalize();
         if (!target.startsWith(targetRoot)) throw new IllegalStateException("Move target escapes move directory");
+        Path targetParent = target.getParent();
+        if (targetParent == null) throw new IllegalStateException("Move target has no parent: " + target);
         try {
-            Files.createDirectories(target.getParent());
+            Files.createDirectories(targetParent);
             FileStore sourceStore = Files.getFileStore(source);
-            FileStore targetStore = Files.getFileStore(target.getParent());
+            FileStore targetStore = Files.getFileStore(targetParent);
             if (!sourceStore.equals(targetStore))
                 throw new IllegalStateException("Move directory is on another file system");
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
@@ -317,6 +326,10 @@ public final class WatcherScanner {
             if (outcome.error() != null) errors.add(outcome.error());
         }
 
+        private synchronized void discovered(long count) {
+            discovered = count;
+        }
+
         private synchronized void error(String tenantId, String operation, Throwable exception) {
             failed++;
             String summary =
@@ -324,7 +337,7 @@ public final class WatcherScanner {
             errors.add(new MaintenanceError(tenantId, operation, summary));
         }
 
-        private WatcherScanResult build(Instant finishedAt) {
+        private synchronized WatcherScanResult build(Instant finishedAt) {
             return new WatcherScanResult(
                     watcherId, startedAt, finishedAt, discovered, imported, skipped, failed, bytes, errors);
         }

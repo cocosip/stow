@@ -1,5 +1,6 @@
 package io.github.cocosip.stow.internal.projection;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.exception.ProjectionException;
 import io.github.cocosip.stow.internal.quota.QuotaReservation;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
@@ -11,6 +12,9 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Optional;
 
+@SuppressFBWarnings(
+        value = "EI_EXPOSE_REP2",
+        justification = "Projection stores are owned runtime services and are intentionally shared by the reducer.")
 public final class QueueEventReducer {
 
     private final SqliteMetadataProjectionStore metadata;

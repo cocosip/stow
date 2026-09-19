@@ -18,6 +18,8 @@ import java.util.regex.Pattern;
 /** Bounded, in-memory, fixed-bucket statistics aggregation. */
 public final class WindowedStatisticsRecorder implements StatisticsRecorder {
 
+    private static final String TOTAL_LABELS = "all";
+
     private static final Pattern DIMENSION_VALUE = Pattern.compile("[A-Za-z0-9._-]{1,128}");
     private final Clock clock;
     private final long windowMillis;
@@ -88,7 +90,7 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
         Counters aggregate = new Counters();
         Map<String, Long> series = new java.util.LinkedHashMap<>();
         for (Bucket bucket : selected) {
-            if (matchesQuery(bucket.totalLabels, query)) aggregate.add(bucket.total);
+            if (matchesQuery(TOTAL_LABELS, query)) aggregate.add(bucket.total);
             for (Map.Entry<String, Series> entry : bucket.series.entrySet()) {
                 if (!matchesQuery(entry.getKey(), query)) continue;
                 Series value = entry.getValue();
@@ -220,7 +222,6 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
 
     private static final class Bucket {
         private final long start;
-        private final String totalLabels = "all";
         private final Counters total = new Counters();
         private final Map<String, Series> series = new java.util.HashMap<>();
 

@@ -19,7 +19,9 @@ public final class JournalScanner {
     }
 
     public Result scan(Path log, JournalCodec codec, boolean allowCompactedSuffix) throws IOException {
-        Files.createDirectories(log.getParent());
+        Path parent = log.toAbsolutePath().normalize().getParent();
+        if (parent == null) throw new IOException("Journal path has no parent: " + log);
+        Files.createDirectories(parent);
         if (!Files.exists(log)) {
             Files.createFile(log);
         }
@@ -160,5 +162,9 @@ public final class JournalScanner {
     public record Record(long offset, long nextOffset, QueueEventRecord event) {}
 
     public record Result(
-            List<Record> records, long physicalLength, boolean repaired, long corruptOffset, long lastSequenceNumber) {}
+            List<Record> records, long physicalLength, boolean repaired, long corruptOffset, long lastSequenceNumber) {
+        public Result {
+            records = List.copyOf(records);
+        }
+    }
 }

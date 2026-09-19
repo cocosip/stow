@@ -223,7 +223,11 @@ public final class TenantJournalWriter implements AutoCloseable {
         }
     }
 
-    public record WriteResult(List<JournalScanner.Record> records, long tailOffset) {}
+    public record WriteResult(List<JournalScanner.Record> records, long tailOffset) {
+        public WriteResult {
+            records = List.copyOf(records);
+        }
+    }
 
     private static final class Pending {
         private final List<QueueEventRecord> events;

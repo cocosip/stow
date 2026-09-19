@@ -1,9 +1,13 @@
 package io.github.cocosip.stow.internal.projection;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+@SuppressFBWarnings(
+        value = "EI_EXPOSE_REP2",
+        justification = "The metadata projection is an owned runtime service injected for cache reads.")
 public final class ActiveFileCache {
 
     private final SqliteMetadataProjectionStore metadata;

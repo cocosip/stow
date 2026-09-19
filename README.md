@@ -269,11 +269,26 @@ Windows:
 ```
 
 The Spring Boot sample uses the starter and can be started with
-`spring-boot:run` after the reactor has been built:
+`spring-boot:run` after the reactor has been installed:
 
 ```bash
-./mvnw -pl samples/stow-sample-spring-boot -am spring-boot:run
+./mvnw -pl samples/stow-sample-spring-boot -am -DskipTests install
+cd samples/stow-sample-spring-boot
+../../mvnw spring-boot:run
 ```
+
+Windows PowerShell:
+
+```powershell
+.\mvnw.cmd -pl samples/stow-sample-spring-boot -am -DskipTests install
+Push-Location samples/stow-sample-spring-boot
+..\..\mvnw.cmd spring-boot:run
+Pop-Location
+```
+
+The sample reads its Stow paths from `src/main/resources/application.yml`.
+The Maven run configuration sets the module directory as the working directory,
+so the relative `sample-data/` paths stay inside this sample module.
 
 The samples exercise write, claim, complete, close, reopen, and read behavior
 when run manually in a module-local data directory. Sample modules intentionally

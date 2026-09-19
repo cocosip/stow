@@ -19,6 +19,14 @@
     </license>
   </licenses>
 
+  <developers>
+    <developer>
+      <id>cocosip</id>
+      <name>cocosip</name>
+      <url>https://github.com/cocosip</url>
+    </developer>
+  </developers>
+
   <modules>
     <module>stow-core</module>
     <module>stow-spring-boot-starter</module>
@@ -26,6 +34,21 @@
     <module>samples/stow-sample-spring-boot</module>
     <module>benchmarks</module>
   </modules>
+
+  <scm>
+    <connection>scm:git:https://github.com/cocosip/stow.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/cocosip/stow.git</developerConnection>
+    <tag>HEAD</tag>
+    <url>https://github.com/cocosip/stow</url>
+  </scm>
+
+  <distributionManagement>
+    <repository>
+      <id>central</id>
+      <name>Sonatype Central Portal</name>
+      <url>https://central.sonatype.com/api/v1/publisher/deploy</url>
+    </repository>
+  </distributionManagement>
 
   <properties>
     <revision>0.1.0-SNAPSHOT</revision>
@@ -36,6 +59,7 @@
     <slf4j.version>2.0.17</slf4j.version>
     <slf4j1.version>1.7.36</slf4j1.version>
     <spring-boot.version>3.5.6</spring-boot.version>
+    <spring-boot-maven-plugin.version>${spring-boot.version}</spring-boot-maven-plugin.version>
     <sqlite-jdbc.version>3.50.3.0</sqlite-jdbc.version>
     <jackson.version>2.20.0</jackson.version>
     <junit.version>5.13.4</junit.version>
@@ -50,10 +74,15 @@
     <maven-failsafe-plugin.version>3.5.4</maven-failsafe-plugin.version>
     <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
     <maven-javadoc-plugin.version>3.12.0</maven-javadoc-plugin.version>
+    <maven-shade-plugin.version>3.6.0</maven-shade-plugin.version>
     <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
+    <exec-maven-plugin.version>3.5.0</exec-maven-plugin.version>
+    <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
+    <central-publishing-maven-plugin.version>0.8.0</central-publishing-maven-plugin.version>
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
     <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
     <spotbugs-maven-plugin.version>4.9.8.1</spotbugs-maven-plugin.version>
+    <spotbugs-annotations.version>4.9.8</spotbugs-annotations.version>
     <spotless-maven-plugin.version>2.46.1</spotless-maven-plugin.version>
     <flatten-maven-plugin.version>1.7.3</flatten-maven-plugin.version>
   </properties>
@@ -118,6 +147,11 @@
         <version>${awaitility.version}</version>
       </dependency>
       <dependency>
+        <groupId>com.github.spotbugs</groupId>
+        <artifactId>spotbugs-annotations</artifactId>
+        <version>${spotbugs-annotations.version}</version>
+      </dependency>
+      <dependency>
         <groupId>org.openjdk.jmh</groupId>
         <artifactId>jmh-core</artifactId>
         <version>${jmh.version}</version>
@@ -172,6 +206,31 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-source-plugin</artifactId>
           <version>${maven-source-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <version>${maven-shade-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-maven-plugin</artifactId>
+          <version>${spring-boot-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>exec-maven-plugin</artifactId>
+          <version>${exec-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-gpg-plugin</artifactId>
+          <version>${maven-gpg-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.sonatype.central</groupId>
+          <artifactId>central-publishing-maven-plugin</artifactId>
+          <version>${central-publishing-maven-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -383,23 +442,59 @@
 
   <profiles>
     <profile>
-      <id>slf4j1-compat</id>
-      <properties>
-        <slf4j.version>${slf4j1.version}</slf4j.version>
-      </properties>
-      <dependencies>
-        <dependency>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-simple</artifactId>
-          <scope>test</scope>
-        </dependency>
-      </dependencies>
-    </profile>
-    <profile>
       <id>spring-boot-compat</id>
       <properties>
         <spring-boot.version>4.0.0</spring-boot.version>
       </properties>
+    </profile>
+    <profile>
+      <id>benchmarks</id>
+      <properties>
+        <benchmark.profile.active>true</benchmark.profile.active>
+      </properties>
+    </profile>
+    <profile>
+      <id>release</id>
+      <activation>
+        <property>
+          <name>release</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+                <phase>verify</phase>
+                <configuration>
+                  <passphrase>${env.MAVEN_GPG_PASSPHRASE}</passphrase>
+                  <gpgArguments>
+                    <arg>--batch</arg>
+                    <arg>--pinentry-mode</arg>
+                    <arg>loopback</arg>
+                  </gpgArguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
   </profiles>
 </project>

@@ -1,5 +1,6 @@
 package io.github.cocosip.stow.spring;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.config.JournalAckMode;
 import io.github.cocosip.stow.config.JournalFormat;
 import io.github.cocosip.stow.config.PermanentlyFailedDisposition;
@@ -19,6 +20,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /** Spring-bound representation of the framework-neutral Stow configuration. */
 @ConfigurationProperties("stow")
+@SuppressFBWarnings(
+        value = "EI_EXPOSE_REP",
+        justification = "Spring Boot binding requires mutable nested configuration objects and lists")
 public class StowProperties {
 
     private final PathsProperties paths = new PathsProperties();

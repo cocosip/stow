@@ -70,7 +70,9 @@ public final class OrphanFileRecovery {
         if (maxFilesPerTenant <= 0) throw new IllegalArgumentException("maxFilesPerTenant must be positive");
         Set<String> tenants = new java.util.TreeSet<>(journal.tenantIds());
         for (StorageVolume volume : volumes.values()) {
-            try (var paths = Files.list(volume.mountPath())) {
+            Path mountPath = volume.mountPath();
+            if (mountPath == null) continue;
+            try (var paths = Files.list(mountPath)) {
                 paths.filter(Files::isDirectory)
                         .map(path -> path.getFileName().toString())
                         .forEach(tenants::add);
@@ -88,13 +90,14 @@ public final class OrphanFileRecovery {
 
     private void recoverFromVolume(
             StorageVolume volume, String tenantId, int maxFiles, CleanupStatisticsBuilder statistics) {
-        Path tenantRoot = volume.mountPath()
-                .toAbsolutePath()
-                .normalize()
-                .resolve(tenantId)
-                .normalize();
-        if (!tenantRoot.startsWith(volume.mountPath().toAbsolutePath().normalize())
-                || !Files.isDirectory(tenantRoot, LinkOption.NOFOLLOW_LINKS)) return;
+        Path configuredMount = volume.mountPath();
+        if (configuredMount == null) {
+            statistics.failed(tenantId, "orphan-scan", new IllegalStateException("Storage volume has no mount path"));
+            return;
+        }
+        Path mount = configuredMount.toAbsolutePath().normalize();
+        Path tenantRoot = mount.resolve(tenantId).normalize();
+        if (!tenantRoot.startsWith(mount) || !Files.isDirectory(tenantRoot, LinkOption.NOFOLLOW_LINKS)) return;
         List<Path> candidates;
         try (var paths = Files.walk(tenantRoot)) {
             candidates = paths.filter(path -> !path.startsWith(tenantRoot.resolve(".deadletter")))
@@ -107,7 +110,13 @@ public final class OrphanFileRecovery {
             return;
         }
         for (Path path : candidates) {
-            Matcher matcher = FILE_NAME.matcher(path.getFileName().toString());
+            Path fileName = path.getFileName();
+            if (fileName == null) {
+                statistics.skipped();
+                continue;
+            }
+            String fileNameText = fileName.toString();
+            Matcher matcher = FILE_NAME.matcher(fileNameText);
             if (!matcher.matches()) {
                 statistics.skipped();
                 continue;
@@ -135,6 +144,10 @@ public final class OrphanFileRecovery {
                     Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
             Instant createdAt = attributes.creationTime().toInstant();
             String extension = matcher.group("extension");
+            Path fileName = path.getFileName();
+            if (fileName == null) {
+                throw new IllegalStateException("Recovered orphan has no file name: " + path);
+            }
             QueueEventRecord accepted = new QueueEventRecord(
                     1,
                     java.util.UUID.randomUUID(),
@@ -153,7 +166,7 @@ public final class OrphanFileRecovery {
                     0,
                     null,
                     null,
-                    path.getFileName().toString(),
+                    fileName.toString(),
                     extension);
             appender.append(accepted);
             projection.projectTenantUntilCaughtUp(tenantId, 256);

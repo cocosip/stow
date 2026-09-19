@@ -51,7 +51,9 @@ public final class ProjectionSnapshotStore {
         if (snapshot == null) throw new IllegalArgumentException("snapshot must not be null");
         try {
             Path target = path(snapshot.tenantId());
-            Files.createDirectories(target.getParent());
+            Path parent = target.getParent();
+            if (parent == null) throw new IOException("Snapshot path has no parent: " + target);
+            Files.createDirectories(parent);
             ObjectNode document = mapper.valueToTree(snapshot.withoutChecksum(mapper));
             byte[] canonical = mapper.writeValueAsBytes(document);
             document.put("crc32", crc32(canonical));

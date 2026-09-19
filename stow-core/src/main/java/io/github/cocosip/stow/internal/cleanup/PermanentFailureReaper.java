@@ -112,8 +112,12 @@ public final class PermanentFailureReaper {
         if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
             throw new IllegalStateException("Physical file does not exist: " + source);
         }
+        Path targetParent = target.getParent();
+        if (targetParent == null) {
+            throw new IllegalStateException("Dead-letter target has no parent: " + target);
+        }
         try {
-            Files.createDirectories(target.getParent());
+            Files.createDirectories(targetParent);
         } catch (java.io.IOException exception) {
             throw new IllegalStateException("Unable to create dead-letter directory", exception);
         }
@@ -124,7 +128,9 @@ public final class PermanentFailureReaper {
     }
 
     private Path deadLetterPath(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
-        Path mount = volume.mountPath().toAbsolutePath().normalize();
+        Path configuredMount = volume.mountPath();
+        if (configuredMount == null) throw new IllegalStateException("Storage volume has no mount path");
+        Path mount = configuredMount.toAbsolutePath().normalize();
         Path source = Path.of(row.physicalPath()).toAbsolutePath().normalize();
         Path relative = mount.relativize(source);
         if (relative.getNameCount() < 2 || !relative.getName(0).toString().equals(row.tenantId())) {
@@ -137,7 +143,11 @@ public final class PermanentFailureReaper {
         for (int index = 1; index < relative.getNameCount() - 1; index++) {
             target = target.resolve(relative.getName(index).toString());
         }
-        return target.resolve(relative.getFileName().toString()).normalize();
+        Path fileName = relative.getFileName();
+        if (fileName == null) {
+            throw new IllegalStateException("Physical path has no file name: " + source);
+        }
+        return target.resolve(fileName.toString()).normalize();
     }
 
     private QueueEventRecord event(SqliteMetadataProjectionStore.FileRow row) {

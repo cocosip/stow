@@ -13,7 +13,7 @@ public final class JournalFrame {
     public static final int TRAILER_SIZE = 4;
     public static final int MIN_FRAME_LENGTH = HEADER_SIZE + TRAILER_SIZE;
     public static final int MAX_PAYLOAD_LENGTH = 1024 * 1024;
-    public static final byte[] MAGIC = "STW1".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] MAGIC = "STW1".getBytes(StandardCharsets.US_ASCII);
 
     private final int frameLength;
     private final long sequenceNumber;

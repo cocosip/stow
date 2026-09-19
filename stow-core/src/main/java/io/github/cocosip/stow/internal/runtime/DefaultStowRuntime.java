@@ -1,5 +1,6 @@
 package io.github.cocosip.stow.internal.runtime;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.RuntimeState;
 import io.github.cocosip.stow.StowRuntime;
 import io.github.cocosip.stow.api.DirectoryQuotaManager;
@@ -14,15 +15,33 @@ import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.api.TenantQuotaManager;
 import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
+import io.github.cocosip.stow.internal.cleanup.DefaultStorageMaintenance;
+import io.github.cocosip.stow.internal.filesystem.DefaultStorageVolumeProvider;
+import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
+import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
+import io.github.cocosip.stow.internal.journal.JsonLinesJournalCodec;
+import io.github.cocosip.stow.internal.projection.ActiveFileCache;
+import io.github.cocosip.stow.internal.projection.ProjectionCursorStore;
+import io.github.cocosip.stow.internal.projection.ProjectionMaintenanceService;
+import io.github.cocosip.stow.internal.projection.ProjectionSnapshotStore;
+import io.github.cocosip.stow.internal.projection.QueueEventReducer;
+import io.github.cocosip.stow.internal.projection.QueueProjectionService;
+import io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore;
 import io.github.cocosip.stow.internal.quota.DefaultDirectoryQuotaManager;
 import io.github.cocosip.stow.internal.quota.DefaultTenantQuotaManager;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
+import io.github.cocosip.stow.internal.scheduler.DefaultStoragePool;
+import io.github.cocosip.stow.internal.statistics.DefaultStatisticsReader;
 import io.github.cocosip.stow.internal.tenant.DefaultTenantManager;
 import io.github.cocosip.stow.internal.tenant.JsonTenantRepository;
+import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherAutoManager;
+import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherManager;
 import io.github.cocosip.stow.model.ComponentHealth;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.RuntimeHealth;
 import io.github.cocosip.stow.spi.JournalCodec;
+import io.github.cocosip.stow.spi.QueueEventJournal;
+import io.github.cocosip.stow.spi.StorageVolume;
 import io.github.cocosip.stow.spi.StorageVolumeProvider;
 import java.time.Clock;
 import java.util.ArrayDeque;
@@ -36,6 +55,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
 
+@SuppressFBWarnings(
+        value = "EI_EXPOSE_REP",
+        justification = "The runtime intentionally exposes its public service facades while owning their lifecycle.")
 public final class DefaultStowRuntime implements StowRuntime {
 
     private final StowConfiguration configuration;
@@ -53,6 +75,16 @@ public final class DefaultStowRuntime implements StowRuntime {
     private ScheduledExecutorService scheduler;
     private TenantManager tenantManager;
     private SqliteQuotaRepository quotaRepository;
+    private QueueEventJournal eventJournal;
+    private SqliteMetadataProjectionStore metadataProjection;
+    private QueueProjectionService projectionService;
+    private ProjectionMaintenanceService projectionMaintenanceService;
+    private DefaultStoragePool storagePoolService;
+    private DefaultStorageMaintenance storageMaintenanceService;
+    private DefaultFileWatcherManager watcherManagerService;
+    private DefaultFileWatcherAutoManager watcherAutoManagerService;
+    private DefaultStatisticsReader statisticsReaderService;
+    private List<StorageVolume> storageVolumes = List.of();
 
     DefaultStowRuntime(
             StowConfiguration configuration,
@@ -96,6 +128,7 @@ public final class DefaultStowRuntime implements StowRuntime {
             initializeExecutors();
             initializeTenantManager();
             initializeQuotaManagers();
+            initializeStorageServices();
             for (ManagedBackgroundService service : backgroundServices) {
                 ownedResources.push(service);
                 service.start();
@@ -130,7 +163,9 @@ public final class DefaultStowRuntime implements StowRuntime {
 
     @Override
     public StoragePool storagePool() {
-        return unavailableService("StoragePool");
+        ensureRunning();
+        if (storagePoolService == null) return unavailableService("StoragePool");
+        return storagePoolService;
     }
 
     @Override
@@ -153,32 +188,43 @@ public final class DefaultStowRuntime implements StowRuntime {
 
     @Override
     public StorageMaintenance maintenance() {
-        return unavailableService("StorageMaintenance");
+        ensureRunning();
+        if (storageMaintenanceService == null) return unavailableService("StorageMaintenance");
+        return storageMaintenanceService;
     }
 
     @Override
     public QueueProjectionMaintenance projectionMaintenance() {
-        return unavailableService("QueueProjectionMaintenance");
+        ensureRunning();
+        if (projectionMaintenanceService == null) return unavailableService("QueueProjectionMaintenance");
+        return projectionMaintenanceService;
     }
 
     @Override
     public FileWatcherManager fileWatcherManager() {
-        return unavailableService("FileWatcherManager");
+        ensureRunning();
+        if (watcherManagerService == null) return unavailableService("FileWatcherManager");
+        return watcherManagerService;
     }
 
     @Override
     public FileWatcherOptionsManager fileWatcherOptionsManager() {
-        return unavailableService("FileWatcherOptionsManager");
+        ensureRunning();
+        if (watcherManagerService == null) return unavailableService("FileWatcherOptionsManager");
+        return watcherManagerService.options();
     }
 
     @Override
     public FileWatcherAutoManager fileWatcherAutoManager() {
-        return unavailableService("FileWatcherAutoManager");
+        ensureRunning();
+        if (watcherAutoManagerService == null) return unavailableService("FileWatcherAutoManager");
+        return watcherAutoManagerService;
     }
 
     @Override
     public StatisticsReader statisticsReader() {
-        return unavailableService("StatisticsReader");
+        ensureRunning();
+        return statisticsReaderService;
     }
 
     @Override
@@ -244,6 +290,93 @@ public final class DefaultStowRuntime implements StowRuntime {
         DefaultTenantManager tenants = (DefaultTenantManager) tenantManager;
         quotaRepository = new SqliteQuotaRepository(
                 configuration.paths().quotaDirectory(), configuration.sqlite(), clock, tenants::quotaLimit);
+    }
+
+    private void initializeStorageServices() {
+        StorageVolumeProvider provider =
+                storageVolumeProvider == null ? new DefaultStorageVolumeProvider() : storageVolumeProvider;
+        storageVolumes = configuration.volumes().stream()
+                .map(configuration -> provider.create(configuration))
+                .toList();
+        if (!storageVolumes.isEmpty()) {
+            ownedResources.push(() -> closeVolumes(storageVolumes));
+        }
+
+        JournalCodec codec = journalCodec == null ? defaultJournalCodec() : journalCodec;
+        eventJournal =
+                new FileQueueEventJournal(configuration.paths().queueDirectory(), configuration.journal(), codec);
+        ownedResources.push(eventJournal);
+
+        metadataProjection = new SqliteMetadataProjectionStore(
+                configuration.paths().metadataDirectory(), configuration.sqlite(), clock);
+        QueueEventReducer reducer = new QueueEventReducer(metadataProjection, quotaRepository);
+        ProjectionCursorStore cursors =
+                new ProjectionCursorStore(configuration.paths().metadataDirectory(), clock);
+        ProjectionSnapshotStore snapshots =
+                new ProjectionSnapshotStore(configuration.paths().metadataDirectory());
+        ActiveFileCache activeCache = new ActiveFileCache(metadataProjection);
+        projectionService = new QueueProjectionService(eventJournal, reducer, cursors, clock, activeCache);
+        projectionMaintenanceService =
+                new ProjectionMaintenanceService(eventJournal, projectionService, cursors, snapshots, reducer);
+
+        if (!storageVolumes.isEmpty()) {
+            storagePoolService = new DefaultStoragePool(
+                    DefaultStoragePool.tenantManager(tenantManager),
+                    quotaRepository,
+                    metadataProjection,
+                    projectionService,
+                    eventJournal,
+                    storageVolumes,
+                    clock,
+                    configuration.retry());
+            storageMaintenanceService = new DefaultStorageMaintenance(
+                    eventJournal,
+                    metadataProjection,
+                    quotaRepository,
+                    projectionService,
+                    storageVolumes,
+                    configuration.paths().metadataDirectory(),
+                    configuration.paths().quotaDirectory(),
+                    configuration.sqlite(),
+                    clock,
+                    configuration.cleanup(),
+                    tenantId -> ((DefaultTenantManager) tenantManager).quotaLimit(tenantId));
+            watcherManagerService = new DefaultFileWatcherManager(
+                    configuration.paths().watcherDirectory(), storagePoolService, tenantManager, clock);
+            watcherAutoManagerService = new DefaultFileWatcherAutoManager(
+                    configuration.paths().watcherDirectory(), watcherManagerService, tenantManager, clock);
+        }
+        statisticsReaderService = new DefaultStatisticsReader(configuration.statistics(), clock);
+        replayJournal(cursors);
+    }
+
+    private void replayJournal(ProjectionCursorStore cursors) {
+        for (String tenantId : eventJournal.tenantIds()) {
+            projectionService.projectTenantUntilCaughtUp(
+                    tenantId, configuration.projection().maxRecordsPerTenantCycle());
+        }
+    }
+
+    private JournalCodec defaultJournalCodec() {
+        return configuration.journal().format() == io.github.cocosip.stow.config.JournalFormat.JSON_LINES_V1
+                ? new JsonLinesJournalCodec()
+                : new BinaryV1JournalCodec();
+    }
+
+    private static void closeVolumes(List<StorageVolume> volumes) {
+        RuntimeException failure = null;
+        for (StorageVolume volume : volumes) {
+            try {
+                volume.close();
+            } catch (Exception exception) {
+                RuntimeException current = exception instanceof RuntimeException runtime
+                        ? runtime
+                        : new IllegalStateException("Unable to close storage volume", exception);
+                if (failure == null) failure = current;
+                else failure.addSuppressed(current);
+            }
+        }
+        if (failure != null) throw failure;
     }
 
     private RuntimeException closeOwnedResources() {
