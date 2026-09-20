@@ -4,6 +4,8 @@ import io.github.cocosip.stow.api.FileWatcherManager;
 import io.github.cocosip.stow.api.FileWatcherOptionsManager;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
+import io.github.cocosip.stow.internal.statistics.NoopStatisticsRecorder;
+import io.github.cocosip.stow.internal.statistics.StatisticsRecorder;
 import io.github.cocosip.stow.model.WatcherConfiguration;
 import io.github.cocosip.stow.model.WatcherOptions;
 import io.github.cocosip.stow.model.WatcherScanResult;
@@ -18,6 +20,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /** Public watcher configuration facade backed by durable state. */
 public final class DefaultFileWatcherManager implements FileWatcherManager, AutoCloseable {
@@ -25,21 +28,43 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
     private final WatcherConfigurationStore store;
     private final WatcherScanner scanner;
     private final DefaultOptionsManager options;
+    private final Consumer<WatcherScanResult> scanObserver;
     private final AtomicBoolean running = new AtomicBoolean();
     private ScheduledExecutorService scheduler;
 
     public DefaultFileWatcherManager(
             Path watcherDirectory, StoragePool storagePool, TenantManager tenants, Clock clock) {
+        this(watcherDirectory, storagePool, tenants, clock, new NoopStatisticsRecorder(clock));
+    }
+
+    public DefaultFileWatcherManager(
+            Path watcherDirectory,
+            StoragePool storagePool,
+            TenantManager tenants,
+            Clock clock,
+            StatisticsRecorder statistics) {
+        this(watcherDirectory, storagePool, tenants, clock, statistics, ignored -> {});
+    }
+
+    public DefaultFileWatcherManager(
+            Path watcherDirectory,
+            StoragePool storagePool,
+            TenantManager tenants,
+            Clock clock,
+            StatisticsRecorder statistics,
+            Consumer<WatcherScanResult> scanObserver) {
         store = new WatcherConfigurationStore(watcherDirectory);
         ImportedFileHistory history = new ImportedFileHistory(watcherDirectory.resolve("history"), clock);
-        scanner = new WatcherScanner(storagePool, tenants, history, clock);
+        scanner = new WatcherScanner(storagePool, tenants, history, clock, statistics);
         options = new DefaultOptionsManager(store);
+        this.scanObserver = Objects.requireNonNull(scanObserver, "scanObserver");
     }
 
     public DefaultFileWatcherManager(WatcherConfigurationStore store, WatcherScanner scanner) {
         this.store = Objects.requireNonNull(store, "store");
         this.scanner = Objects.requireNonNull(scanner, "scanner");
         options = new DefaultOptionsManager(store);
+        scanObserver = ignored -> {};
     }
 
     @Override
@@ -95,7 +120,9 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
 
     @Override
     public WatcherScanResult scanNow(String watcherId) {
-        return scanner.scan(requireExisting(watcherId));
+        WatcherScanResult result = scanner.scan(requireExisting(watcherId));
+        scanObserver.accept(result);
+        return result;
     }
 
     public FileWatcherOptionsManager options() {
@@ -144,7 +171,7 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
                     try {
                         permits.acquire();
                         acquired = true;
-                        scanner.scan(configuration);
+                        scanObserver.accept(scanner.scan(configuration));
                     } catch (InterruptedException exception) {
                         Thread.currentThread().interrupt();
                     } catch (RuntimeException ignored) {

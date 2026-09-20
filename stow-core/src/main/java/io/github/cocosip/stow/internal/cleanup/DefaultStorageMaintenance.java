@@ -3,6 +3,7 @@ package io.github.cocosip.stow.internal.cleanup;
 import io.github.cocosip.stow.api.StorageMaintenance;
 import io.github.cocosip.stow.config.CleanupConfiguration;
 import io.github.cocosip.stow.config.SqliteConfiguration;
+import io.github.cocosip.stow.internal.journal.SequencedJournalAppender;
 import io.github.cocosip.stow.internal.projection.QueueProjectionService;
 import io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
@@ -70,7 +71,8 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
                 clock,
                 configuration,
                 initialTenantLimit,
-                null);
+                null,
+                new SequencedJournalAppender(journal));
     }
 
     public DefaultStorageMaintenance(
@@ -86,6 +88,36 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
             CleanupConfiguration configuration,
             ToLongFunction<String> initialTenantLimit,
             ProcessingTimeoutRecovery timeoutRecovery) {
+        this(
+                journal,
+                metadata,
+                quota,
+                projection,
+                volumes,
+                metadataRoot,
+                quotaRoot,
+                sqlite,
+                clock,
+                configuration,
+                initialTenantLimit,
+                timeoutRecovery,
+                new SequencedJournalAppender(journal));
+    }
+
+    public DefaultStorageMaintenance(
+            QueueEventJournal journal,
+            SqliteMetadataProjectionStore metadata,
+            SqliteQuotaRepository quota,
+            QueueProjectionService projection,
+            List<StorageVolume> volumes,
+            Path metadataRoot,
+            Path quotaRoot,
+            SqliteConfiguration sqlite,
+            Clock clock,
+            CleanupConfiguration configuration,
+            ToLongFunction<String> initialTenantLimit,
+            ProcessingTimeoutRecovery timeoutRecovery,
+            SequencedJournalAppender appender) {
         this.journal = Objects.requireNonNull(journal, "journal");
         this.metadata = Objects.requireNonNull(metadata, "metadata");
         this.quota = Objects.requireNonNull(quota, "quota");
@@ -101,9 +133,11 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
         SqliteConfiguration effectiveSqlite =
                 sqlite == null ? io.github.cocosip.stow.internal.sqlite.SqliteConnectionFactory.defaults() : sqlite;
         ToLongFunction<String> effectiveLimit = initialTenantLimit == null ? ignored -> 0 : initialTenantLimit;
-        completed = new CompletedFileReaper(journal, metadata, projection, this.volumes, clock);
-        permanentFailure = new PermanentFailureReaper(journal, metadata, projection, this.volumes, clock);
-        orphans = new OrphanFileRecovery(journal, metadata, quota, projection, this.volumes, clock);
+        SequencedJournalAppender sharedAppender = Objects.requireNonNull(appender, "appender");
+        completed = new CompletedFileReaper(journal, metadata, projection, this.volumes, clock, sharedAppender);
+        permanentFailure =
+                new PermanentFailureReaper(journal, metadata, projection, this.volumes, clock, sharedAppender);
+        orphans = new OrphanFileRecovery(journal, metadata, quota, projection, this.volumes, clock, sharedAppender);
         junk = new JunkFileCleaner(this.volumes, List.of(this.metadataRoot, this.quotaRoot), clock);
         health = new DatabaseHealthService(this.metadataRoot, this.quotaRoot, clock);
         recovery = new DatabaseRecoveryService(

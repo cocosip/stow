@@ -149,15 +149,14 @@ public final class TenantJournalWriter implements AutoCloseable {
 
     private void write(List<Pending> batch) {
         try {
-            List<JournalScanner.Record> records = new ArrayList<>();
             boolean wrote = false;
+            long lastSequence = 0;
             for (Pending pending : batch) {
                 for (QueueEventRecord event : pending.events) {
                     byte[] bytes = codec.encode(event);
-                    long start = nextOffset;
                     writeFully(ByteBuffer.wrap(bytes));
                     nextOffset += bytes.length;
-                    records.add(new JournalScanner.Record(start, nextOffset, event));
+                    lastSequence = event.sequenceNumber();
                     wrote = true;
                 }
             }
@@ -165,7 +164,7 @@ public final class TenantJournalWriter implements AutoCloseable {
                 channel.force(true);
             }
             if (wrote) {
-                resultConsumer.accept(new WriteResult(List.copyOf(records), nextOffset));
+                resultConsumer.accept(new WriteResult(nextOffset, lastSequence));
             }
             for (Pending pending : batch) {
                 pending.completion.complete(null);
@@ -223,11 +222,7 @@ public final class TenantJournalWriter implements AutoCloseable {
         }
     }
 
-    public record WriteResult(List<JournalScanner.Record> records, long tailOffset) {
-        public WriteResult {
-            records = List.copyOf(records);
-        }
-    }
+    public record WriteResult(long tailOffset, long lastSequenceNumber) {}
 
     private static final class Pending {
         private final List<QueueEventRecord> events;

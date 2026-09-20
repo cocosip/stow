@@ -9,8 +9,11 @@ import io.github.cocosip.stow.config.JournalFormat;
 import io.github.cocosip.stow.model.FileProcessingStatus;
 import io.github.cocosip.stow.model.QueueEventRecord;
 import io.github.cocosip.stow.model.QueueEventType;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -36,6 +39,23 @@ class FileQueueEventJournalTest {
         try (FileQueueEventJournal reopened =
                 new FileQueueEventJournal(root, configuration, new BinaryV1JournalCodec())) {
             assertThat(reopened.readBatch("tenant-a", 0, 10).events()).containsExactly(event);
+        }
+    }
+
+    @Test
+    void returnsEmptyBatchWhenReadStartsBeyondTail() throws Exception {
+        Path root = Files.createTempDirectory("stow-journal-read-beyond-tail");
+        try (FileQueueEventJournal journal =
+                new FileQueueEventJournal(root, configuration(JournalAckMode.DURABLE), new BinaryV1JournalCodec())) {
+            journal.append(event("tenant-a", 1));
+            long offset = journal.tailOffset("tenant-a") + 17;
+
+            JournalReadBatch batch = journal.readBatch("tenant-a", offset, 10);
+
+            assertThat(batch.events()).isEmpty();
+            assertThat(batch.startOffset()).isEqualTo(offset);
+            assertThat(batch.nextOffset()).isEqualTo(offset);
+            assertThat(batch.lastSequenceNumber()).isEqualTo(1);
         }
     }
 
@@ -180,6 +200,33 @@ class FileQueueEventJournalTest {
                     .extracting(QueueEventRecord::sequenceNumber)
                     .containsExactly(2L, 3L);
         }
+    }
+
+    @Test
+    void reportsOversizedSparseCorruptionWithinAConstrainedHeap() throws Exception {
+        Path root = Files.createTempDirectory("stow-journal-sparse");
+        Path tenant = root.resolve("tenant-a");
+        Files.createDirectories(tenant);
+        try (FileChannel channel =
+                FileChannel.open(tenant.resolve("queue.log"), StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            channel.position(128L * 1024 * 1024 - 1);
+            channel.write(ByteBuffer.wrap(new byte[] {0}));
+        }
+        String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
+        Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java.exe");
+        Process process = new ProcessBuilder(
+                        javaExecutable.toString(),
+                        "-Xmx32m",
+                        "-cp",
+                        classpath,
+                        JournalMemoryProbe.class.getName(),
+                        root.toString())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+
+        assertThat(process.waitFor()).as(output).isZero();
+        assertThat(output).doesNotContain("OutOfMemoryError");
     }
 
     private static JournalConfiguration configuration(JournalAckMode mode) {

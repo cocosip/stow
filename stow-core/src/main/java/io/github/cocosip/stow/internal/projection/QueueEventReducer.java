@@ -4,6 +4,8 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.exception.ProjectionException;
 import io.github.cocosip.stow.internal.quota.QuotaReservation;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
+import io.github.cocosip.stow.internal.statistics.NoopStatisticsRecorder;
+import io.github.cocosip.stow.internal.statistics.StatisticsRecorder;
 import io.github.cocosip.stow.model.FileProcessingStatus;
 import io.github.cocosip.stow.model.QueueEventRecord;
 import io.github.cocosip.stow.model.QueueEventType;
@@ -19,10 +21,17 @@ public final class QueueEventReducer {
 
     private final SqliteMetadataProjectionStore metadata;
     private final SqliteQuotaRepository quota;
+    private final StatisticsRecorder statistics;
 
     public QueueEventReducer(SqliteMetadataProjectionStore metadata, SqliteQuotaRepository quota) {
+        this(metadata, quota, new NoopStatisticsRecorder(java.time.Clock.systemUTC()));
+    }
+
+    public QueueEventReducer(
+            SqliteMetadataProjectionStore metadata, SqliteQuotaRepository quota, StatisticsRecorder statistics) {
         this.metadata = metadata;
         this.quota = quota;
+        this.statistics = statistics;
     }
 
     public void apply(QueueEventRecord event) {
@@ -64,6 +73,7 @@ public final class QueueEventReducer {
                     event.fileKey(),
                     event.logicalDirectory());
         }
+        statistics.recordSqlitePersistence(event.tenantId());
     }
 
     private void reduce(Connection connection, QueueEventRecord event) throws SQLException {

@@ -15,11 +15,13 @@ import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.api.TenantQuotaManager;
 import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
+import io.github.cocosip.stow.exception.StowInterruptedException;
 import io.github.cocosip.stow.internal.cleanup.DefaultStorageMaintenance;
 import io.github.cocosip.stow.internal.filesystem.DefaultStorageVolumeProvider;
 import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
 import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
 import io.github.cocosip.stow.internal.journal.JsonLinesJournalCodec;
+import io.github.cocosip.stow.internal.journal.SequencedJournalAppender;
 import io.github.cocosip.stow.internal.projection.ActiveFileCache;
 import io.github.cocosip.stow.internal.projection.ProjectionCursorStore;
 import io.github.cocosip.stow.internal.projection.ProjectionMaintenanceService;
@@ -31,12 +33,13 @@ import io.github.cocosip.stow.internal.quota.DefaultDirectoryQuotaManager;
 import io.github.cocosip.stow.internal.quota.DefaultTenantQuotaManager;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
 import io.github.cocosip.stow.internal.scheduler.DefaultStoragePool;
+import io.github.cocosip.stow.internal.scheduler.ProcessingTimeoutRecovery;
+import io.github.cocosip.stow.internal.scheduler.TerminalLeaseIndex;
 import io.github.cocosip.stow.internal.statistics.DefaultStatisticsReader;
 import io.github.cocosip.stow.internal.tenant.DefaultTenantManager;
 import io.github.cocosip.stow.internal.tenant.JsonTenantRepository;
 import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherAutoManager;
 import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherManager;
-import io.github.cocosip.stow.model.ComponentHealth;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.RuntimeHealth;
 import io.github.cocosip.stow.spi.JournalCodec;
@@ -44,15 +47,19 @@ import io.github.cocosip.stow.spi.QueueEventJournal;
 import io.github.cocosip.stow.spi.StorageVolume;
 import io.github.cocosip.stow.spi.StorageVolumeProvider;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @SuppressFBWarnings(
@@ -67,6 +74,7 @@ public final class DefaultStowRuntime implements StowRuntime {
     private final StorageVolumeProvider storageVolumeProvider;
     private final JournalCodec journalCodec;
     private final List<ManagedBackgroundService> backgroundServices;
+    private final DefaultRuntimeHealth runtimeHealth;
     private final AtomicReference<RuntimeState> state = new AtomicReference<>(RuntimeState.NEW);
     private final RuntimeQuotaOperationAdmission quotaOperationAdmission = new RuntimeQuotaOperationAdmission(state);
     private final Deque<AutoCloseable> ownedResources = new ArrayDeque<>();
@@ -110,6 +118,7 @@ public final class DefaultStowRuntime implements StowRuntime {
         this.storageVolumeProvider = storageVolumeProvider;
         this.journalCodec = journalCodec;
         this.backgroundServices = List.copyOf(backgroundServices);
+        runtimeHealth = new DefaultRuntimeHealth(clock);
     }
 
     @Override
@@ -129,10 +138,9 @@ public final class DefaultStowRuntime implements StowRuntime {
             initializeTenantManager();
             initializeQuotaManagers();
             initializeStorageServices();
-            for (ManagedBackgroundService service : backgroundServices) {
-                ownedResources.push(service);
-                service.start();
-            }
+            BackgroundServiceCoordinator coordinator = initializeBackgroundServices();
+            ownedResources.push(coordinator);
+            coordinator.start();
             state.set(RuntimeState.RUNNING);
         } catch (RuntimeException | Error failure) {
             state.set(RuntimeState.FAILED);
@@ -229,15 +237,20 @@ public final class DefaultStowRuntime implements StowRuntime {
 
     @Override
     public RuntimeHealth health() {
-        RuntimeState current = state.get();
-        HealthStatus status =
-                switch (current) {
-                    case RUNNING -> HealthStatus.UP;
-                    case NEW, STARTING, STOPPING -> HealthStatus.DEGRADED;
-                    case TERMINATED, FAILED -> HealthStatus.DOWN;
-                };
-        ComponentHealth runtime = new ComponentHealth(status, current.name().toLowerCase(), clock.instant());
-        return new RuntimeHealth(status, Map.of("runtime", runtime));
+        for (StorageVolume volume : storageVolumes) {
+            String component = "volume:" + volume.id();
+            try {
+                boolean healthy = volume.healthy();
+                long available = volume.availableCapacity();
+                runtimeHealth.update(
+                        component,
+                        healthy ? HealthStatus.UP : HealthStatus.DOWN,
+                        healthy ? "availableBytes=" + available : "unhealthy");
+            } catch (RuntimeException failure) {
+                runtimeHealth.update(component, HealthStatus.DOWN, message(failure));
+            }
+        }
+        return runtimeHealth.snapshot(state.get());
     }
 
     Optional<StorageVolumeProvider> storageVolumeProvider() {
@@ -306,16 +319,28 @@ public final class DefaultStowRuntime implements StowRuntime {
         eventJournal =
                 new FileQueueEventJournal(configuration.paths().queueDirectory(), configuration.journal(), codec);
         ownedResources.push(eventJournal);
+        SequencedJournalAppender appender = new SequencedJournalAppender(eventJournal);
+        statisticsReaderService = new DefaultStatisticsReader(configuration.statistics(), clock);
 
         metadataProjection = new SqliteMetadataProjectionStore(
                 configuration.paths().metadataDirectory(), configuration.sqlite(), clock);
-        QueueEventReducer reducer = new QueueEventReducer(metadataProjection, quotaRepository);
+        QueueEventReducer reducer =
+                new QueueEventReducer(metadataProjection, quotaRepository, statisticsReaderService.recorder());
         ProjectionCursorStore cursors =
                 new ProjectionCursorStore(configuration.paths().metadataDirectory(), clock);
         ProjectionSnapshotStore snapshots =
                 new ProjectionSnapshotStore(configuration.paths().metadataDirectory());
         ActiveFileCache activeCache = new ActiveFileCache(metadataProjection);
-        projectionService = new QueueProjectionService(eventJournal, reducer, cursors, clock, activeCache);
+        TerminalLeaseIndex terminalLeases = new TerminalLeaseIndex();
+        rebuildTerminalLeaseIndex(terminalLeases);
+        projectionService = new QueueProjectionService(
+                eventJournal,
+                reducer,
+                cursors,
+                clock,
+                activeCache,
+                failure -> runtimeHealth.update("projection", HealthStatus.DEGRADED, message(failure)),
+                terminalLeases::record);
         projectionMaintenanceService =
                 new ProjectionMaintenanceService(eventJournal, projectionService, cursors, snapshots, reducer);
 
@@ -328,7 +353,12 @@ public final class DefaultStowRuntime implements StowRuntime {
                     eventJournal,
                     storageVolumes,
                     clock,
-                    configuration.retry());
+                    configuration.retry(),
+                    appender,
+                    statisticsReaderService.recorder(),
+                    terminalLeases);
+            ProcessingTimeoutRecovery timeoutRecovery = new ProcessingTimeoutRecovery(
+                    storagePoolService, configuration.cleanup().processingTimeout());
             storageMaintenanceService = new DefaultStorageMaintenance(
                     eventJournal,
                     metadataProjection,
@@ -340,14 +370,105 @@ public final class DefaultStowRuntime implements StowRuntime {
                     configuration.sqlite(),
                     clock,
                     configuration.cleanup(),
-                    tenantId -> ((DefaultTenantManager) tenantManager).quotaLimit(tenantId));
+                    tenantId -> ((DefaultTenantManager) tenantManager).quotaLimit(tenantId),
+                    timeoutRecovery,
+                    appender);
             watcherManagerService = new DefaultFileWatcherManager(
-                    configuration.paths().watcherDirectory(), storagePoolService, tenantManager, clock);
+                    configuration.paths().watcherDirectory(),
+                    storagePoolService,
+                    tenantManager,
+                    clock,
+                    statisticsReaderService.recorder(),
+                    result -> runtimeHealth.update(
+                            "watcher",
+                            result.failedCount() == 0 ? HealthStatus.UP : HealthStatus.DEGRADED,
+                            result.failedCount() == 0
+                                    ? "running"
+                                    : result.errors().get(0).summary()));
             watcherAutoManagerService = new DefaultFileWatcherAutoManager(
                     configuration.paths().watcherDirectory(), watcherManagerService, tenantManager, clock);
+            for (var watcher : configuration.watchers()) {
+                if (watcherManagerService.find(watcher.watcherId()).isPresent()) {
+                    watcherManagerService.update(watcher);
+                } else {
+                    watcherManagerService.register(watcher);
+                }
+            }
         }
-        statisticsReaderService = new DefaultStatisticsReader(configuration.statistics(), clock);
         replayJournal(cursors);
+        runtimeHealth.update("projection", HealthStatus.UP, "ready");
+    }
+
+    private void rebuildTerminalLeaseIndex(TerminalLeaseIndex terminalLeases) {
+        for (String tenantId : eventJournal.tenantIds()) {
+            long cursor = eventJournal.baseOffset(tenantId);
+            long tail = eventJournal.tailOffset(tenantId);
+            while (cursor < tail) {
+                var batch = eventJournal.readBatch(tenantId, cursor, 512);
+                batch.events().forEach(terminalLeases::record);
+                if (batch.events().isEmpty() || batch.nextOffset() <= cursor) break;
+                cursor = batch.nextOffset();
+            }
+        }
+    }
+
+    private BackgroundServiceCoordinator initializeBackgroundServices() {
+        List<BackgroundServiceCoordinator.Service> services = new ArrayList<>();
+        services.add(new ProjectionBackgroundService());
+        if (storageMaintenanceService != null && configuration.cleanup().enabled()) {
+            services.add(BackgroundServiceCoordinator.periodic(
+                    "cleanup",
+                    scheduler,
+                    monitored("cleanup", this::runCleanupCycle),
+                    configuration.cleanup().initialDelay(),
+                    configuration.cleanup().interval()));
+        }
+        if (storageMaintenanceService != null && configuration.orphanRecovery().enabled()) {
+            Duration initialDelay = configuration.orphanRecovery().runOnStartup()
+                    ? Duration.ZERO
+                    : configuration.orphanRecovery().interval();
+            services.add(BackgroundServiceCoordinator.periodic(
+                    "orphan-recovery",
+                    scheduler,
+                    monitored("orphan-recovery", storageMaintenanceService::recoverAllOrphans),
+                    initialDelay,
+                    configuration.orphanRecovery().interval()));
+        }
+        if (watcherManagerService != null) {
+            services.add(new ManagedBackgroundService() {
+                @Override
+                public void start() {
+                    watcherManagerService.start();
+                    runtimeHealth.update("watcher", HealthStatus.UP, "running");
+                }
+
+                @Override
+                public void close() {
+                    watcherManagerService.close();
+                }
+            });
+        }
+        services.addAll(backgroundServices);
+        return new BackgroundServiceCoordinator(services);
+    }
+
+    private void runCleanupCycle() {
+        storageMaintenanceService.reclaimTimedOutProcessing(
+                configuration.cleanup().processingTimeout());
+        storageMaintenanceService.cleanupCompleted(configuration.cleanup().completedRetention());
+        storageMaintenanceService.cleanupPermanentlyFailed(
+                configuration.cleanup().failedRetention());
+    }
+
+    private Runnable monitored(String component, Runnable action) {
+        return () -> {
+            try {
+                action.run();
+                runtimeHealth.update(component, HealthStatus.UP, "ready");
+            } catch (RuntimeException failure) {
+                runtimeHealth.update(component, HealthStatus.DEGRADED, message(failure));
+            }
+        };
     }
 
     private void replayJournal(ProjectionCursorStore cursors) {
@@ -406,6 +527,75 @@ public final class DefaultStowRuntime implements StowRuntime {
     private void ensureRunning() {
         if (state.get() != RuntimeState.RUNNING) {
             throw new RuntimeNotReadyException("Stow runtime is not running");
+        }
+    }
+
+    private static String message(RuntimeException failure) {
+        return failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
+    }
+
+    private final class ProjectionBackgroundService implements BackgroundServiceCoordinator.Service {
+        private final AtomicBoolean running = new AtomicBoolean();
+        private ScheduledFuture<?> future;
+        private Thread runningThread;
+
+        @Override
+        public synchronized void start() {
+            if (!running.compareAndSet(false, true)) return;
+            schedule(Duration.ZERO);
+        }
+
+        @Override
+        public synchronized void close() {
+            running.set(false);
+            if (future != null) future.cancel(false);
+            while (runningThread != null && runningThread != Thread.currentThread()) {
+                try {
+                    wait();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new StowInterruptedException("Interrupted while stopping background projection", exception);
+                }
+            }
+        }
+
+        private void runCycle() {
+            synchronized (this) {
+                if (!running.get()) return;
+                runningThread = Thread.currentThread();
+            }
+            boolean busy = false;
+            try {
+                long deadline = System.nanoTime()
+                        + configuration.projection().cycleTimeBudget().toNanos();
+                int tenants = 0;
+                for (String tenantId :
+                        eventJournal.tenantIds().stream().sorted().toList()) {
+                    if (tenants++ >= configuration.projection().maxTenantsPerCycle() || System.nanoTime() >= deadline)
+                        break;
+                    busy |= projectionService.projectTenant(
+                            tenantId, configuration.projection().maxRecordsPerTenantCycle());
+                }
+                runtimeHealth.update("projection", HealthStatus.UP, "ready");
+            } catch (RuntimeException failure) {
+                runtimeHealth.update("projection", HealthStatus.DEGRADED, message(failure));
+            } finally {
+                synchronized (this) {
+                    runningThread = null;
+                    notifyAll();
+                    if (running.get()) {
+                        schedule(
+                                busy
+                                        ? configuration.projection().busyCycleDelay()
+                                        : configuration.projection().idleCycleDelay());
+                    }
+                }
+            }
+        }
+
+        private synchronized void schedule(Duration delay) {
+            if (!running.get()) return;
+            future = scheduler.schedule(this::runCycle, Math.max(1, delay.toMillis()), TimeUnit.MILLISECONDS);
         }
     }
 }

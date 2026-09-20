@@ -7,11 +7,12 @@ import io.github.cocosip.stow.model.QueueEventRecord;
 import io.github.cocosip.stow.spi.JournalCodec;
 import io.github.cocosip.stow.spi.QueueEventJournal;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -128,25 +129,33 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         TenantLog tenant = tenant(tenantId);
         synchronized (tenant) {
             ensureOpen(tenant);
-            List<QueueEventRecord> selected = new ArrayList<>();
-            long next = offset;
-            long last = 0;
-            for (JournalScanner.Record record : tenant.records) {
-                if (record.nextOffset() <= offset) {
-                    continue;
-                }
-                if (selected.size() >= maxRecords) {
-                    break;
-                }
-                selected.add(record.event());
-                next = record.nextOffset();
-                last = record.event().sequenceNumber();
+            if (offset >= tenant.tailOffset) {
+                return new JournalReadBatch(tenantId, offset, offset, tenant.lastSequence, List.of());
             }
-            if (selected.isEmpty()) {
-                next = Math.max(offset, tenant.tailOffset);
-                last = tenant.lastSequence;
+            long logicalStart = Math.max(offset, tenant.baseOffset);
+            long physicalStart = logicalStart - tenant.baseOffset;
+            long physicalTail = tenant.tailOffset - tenant.baseOffset;
+            try {
+                JournalScanner.ReadResult result = new JournalScanner()
+                        .readBatch(
+                                tenant.directory.resolve("queue.log"),
+                                tenant.codec,
+                                physicalStart,
+                                physicalTail,
+                                maxRecords);
+                if (result.events().isEmpty()) {
+                    return new JournalReadBatch(
+                            tenantId, offset, Math.max(offset, tenant.tailOffset), tenant.lastSequence, List.of());
+                }
+                return new JournalReadBatch(
+                        tenantId,
+                        offset,
+                        tenant.baseOffset + result.nextOffset(),
+                        result.lastSequenceNumber(),
+                        result.events());
+            } catch (IOException exception) {
+                throw new DatabaseRecoveryException("Unable to read journal for tenant " + tenantId, exception);
             }
-            return new JournalReadBatch(tenantId, offset, next, last, selected);
         }
     }
 
@@ -176,7 +185,6 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         TenantLog tenant = tenant(tenantId);
         TenantJournalWriter writer;
         long previousBase;
-        List<JournalScanner.Record> kept;
         Path log;
         synchronized (tenant) {
             ensureOpen(tenant);
@@ -189,9 +197,6 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             writer = tenant.writer;
             tenant.writer = null;
             previousBase = tenant.baseOffset;
-            kept = tenant.records.stream()
-                    .filter(record -> record.nextOffset() > throughOffset)
-                    .toList();
             log = tenant.directory.resolve("queue.log");
         }
         if (writer != null) {
@@ -201,13 +206,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         synchronized (tenant) {
             Path temp = tenant.directory.resolve(".queue.log.compact.tmp");
             try {
-                byte[] source = Files.readAllBytes(log);
-                Files.write(
-                        temp,
-                        java.util.Arrays.copyOfRange(source, (int) (throughOffset - previousBase), source.length),
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.TRUNCATE_EXISTING,
-                        StandardOpenOption.WRITE);
+                copySuffix(log, temp, throughOffset - previousBase);
                 Files.move(
                         temp,
                         log,
@@ -223,7 +222,6 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                 }
             }
             tenant.baseOffset = throughOffset;
-            tenant.records = new ArrayList<>(kept);
             tenant.tailOffset = tenant.baseOffset + FilesSize(log);
             persistState(tenant, false, -1);
         }
@@ -341,22 +339,10 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                 tenant.baseOffset = state.baseOffset();
                 tenant.tailOffset = state.tailOffset();
                 tenant.repairCount = state.repairCount();
-                tenant.records = result.records().stream()
-                        .map(record -> new JournalScanner.Record(
-                                record.offset() + tenant.baseOffset,
-                                record.nextOffset() + tenant.baseOffset,
-                                record.event()))
-                        .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
             } else if (state != null && isCompactionReplacement(state, result)) {
                 tenant.baseOffset = state.tailOffset() - result.physicalLength();
                 tenant.tailOffset = state.tailOffset();
                 tenant.repairCount = state.repairCount();
-                tenant.records = result.records().stream()
-                        .map(record -> new JournalScanner.Record(
-                                record.offset() + tenant.baseOffset,
-                                record.nextOffset() + tenant.baseOffset,
-                                record.event()))
-                        .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
                 persistState(tenant, false, -1);
             }
         } catch (IOException | RuntimeException ignored) {
@@ -370,11 +356,10 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         if (result.physicalLength() >= previousPhysicalLength || state.tailOffset() < state.baseOffset()) {
             return false;
         }
-        if (result.records().isEmpty()) {
+        if (result.recordCount() == 0) {
             return result.physicalLength() == 0 && state.lastSequenceNumber() > 0;
         }
-        return result.lastSequenceNumber() == state.lastSequenceNumber()
-                && result.records().get(0).event().sequenceNumber() > 1;
+        return result.lastSequenceNumber() == state.lastSequenceNumber() && result.firstSequenceNumber() > 1;
     }
 
     private static void cleanupCompactionArtifacts(Path directory) throws IOException {
@@ -391,17 +376,8 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                     tenant.tailOffset - tenant.baseOffset,
                     result -> {
                         synchronized (tenant) {
-                            tenant.records.addAll(result.records().stream()
-                                    .map(record -> new JournalScanner.Record(
-                                            record.offset() + tenant.baseOffset,
-                                            record.nextOffset() + tenant.baseOffset,
-                                            record.event()))
-                                    .toList());
                             tenant.tailOffset = tenant.baseOffset + result.tailOffset();
-                            tenant.lastSequence = result.records()
-                                    .get(result.records().size() - 1)
-                                    .event()
-                                    .sequenceNumber();
+                            tenant.lastSequence = result.lastSequenceNumber();
                             persistState(tenant, false, -1);
                         }
                     });
@@ -457,11 +433,38 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         }
     }
 
+    private static void copySuffix(Path sourcePath, Path targetPath, long startOffset) throws IOException {
+        try (FileChannel source = FileChannel.open(sourcePath, StandardOpenOption.READ);
+                FileChannel target = FileChannel.open(
+                        targetPath,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE)) {
+            long position = startOffset;
+            long remaining = source.size() - startOffset;
+            while (remaining > 0) {
+                long transferred = source.transferTo(position, remaining, target);
+                if (transferred > 0) {
+                    position += transferred;
+                    remaining -= transferred;
+                    continue;
+                }
+                ByteBuffer buffer = ByteBuffer.allocate((int) Math.min(64 * 1024L, remaining));
+                int read = source.read(buffer, position);
+                if (read <= 0) throw new IOException("Journal compaction copy made no progress");
+                buffer.flip();
+                while (buffer.hasRemaining()) target.write(buffer);
+                position += read;
+                remaining -= read;
+            }
+            target.force(true);
+        }
+    }
+
     private static final class TenantLog {
         private final String tenantId;
         private final Path directory;
         private final JournalCodec codec;
-        private List<JournalScanner.Record> records;
         private long baseOffset;
         private long tailOffset;
         private long lastSequence;
@@ -474,7 +477,6 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             this.tenantId = tenantId;
             this.directory = directory;
             this.codec = codec;
-            this.records = new ArrayList<>(result.records());
             this.tailOffset = result.physicalLength();
             this.lastSequence = result.lastSequenceNumber();
             this.admittedSequence = this.lastSequence;
@@ -484,7 +486,6 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             this.tenantId = tenantId;
             this.directory = directory;
             this.codec = new BinaryV1JournalCodec();
-            this.records = new ArrayList<>();
             this.failure = failure;
         }
     }

@@ -2,6 +2,7 @@ package io.github.cocosip.stow.internal.recovery;
 
 import io.github.cocosip.stow.internal.cleanup.CleanupStatisticsBuilder;
 import io.github.cocosip.stow.internal.cleanup.MaintenanceEventAppender;
+import io.github.cocosip.stow.internal.journal.SequencedJournalAppender;
 import io.github.cocosip.stow.internal.projection.QueueProjectionService;
 import io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
@@ -46,6 +47,17 @@ public final class OrphanFileRecovery {
             QueueProjectionService projection,
             List<StorageVolume> volumes,
             Clock clock) {
+        this(journal, metadata, quota, projection, volumes, clock, new SequencedJournalAppender(journal));
+    }
+
+    public OrphanFileRecovery(
+            QueueEventJournal journal,
+            SqliteMetadataProjectionStore metadata,
+            SqliteQuotaRepository quota,
+            QueueProjectionService projection,
+            List<StorageVolume> volumes,
+            Clock clock,
+            SequencedJournalAppender appender) {
         this.journal = Objects.requireNonNull(journal, "journal");
         this.metadata = Objects.requireNonNull(metadata, "metadata");
         this.quota = Objects.requireNonNull(quota, "quota");
@@ -53,7 +65,7 @@ public final class OrphanFileRecovery {
         this.volumes = Objects.requireNonNull(volumes, "volumes").stream()
                 .collect(Collectors.toUnmodifiableMap(StorageVolume::id, Function.identity()));
         this.clock = Objects.requireNonNull(clock, "clock");
-        appender = new MaintenanceEventAppender(journal);
+        this.appender = new MaintenanceEventAppender(appender);
     }
 
     public CleanupStatistics recover(String tenantId, int maxFiles) {
@@ -169,7 +181,7 @@ public final class OrphanFileRecovery {
                     fileName.toString(),
                     extension);
             appender.append(accepted);
-            projection.projectTenantUntilCaughtUp(tenantId, 256);
+            project(tenantId);
             statistics.succeeded(tenantId, attributes.size());
         } catch (RuntimeException | IOException exception) {
             if (createdReservation)
@@ -177,6 +189,14 @@ public final class OrphanFileRecovery {
                         .ifPresent(reservation -> quota.rollback(tenantId, reservation.reservationId()));
             if (exception instanceof RuntimeException runtime) statistics.failed(tenantId, "orphan-recover", runtime);
             else statistics.failed(tenantId, "orphan-recover", new IllegalStateException(exception));
+        }
+    }
+
+    private void project(String tenantId) {
+        try {
+            projection.projectTenantUntilCaughtUp(tenantId, 256);
+        } catch (RuntimeException ignored) {
+            // Journal admission is durable; background projection will retry from its cursor.
         }
     }
 

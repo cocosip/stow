@@ -3,6 +3,8 @@ package io.github.cocosip.stow.internal.watcher;
 import io.github.cocosip.stow.api.ContentSource;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
+import io.github.cocosip.stow.internal.statistics.NoopStatisticsRecorder;
+import io.github.cocosip.stow.internal.statistics.StatisticsRecorder;
 import io.github.cocosip.stow.model.MaintenanceError;
 import io.github.cocosip.stow.model.TenantContext;
 import io.github.cocosip.stow.model.WatcherConfiguration;
@@ -37,12 +39,23 @@ public final class WatcherScanner {
     private final TenantManager tenants;
     private final ImportedFileHistory history;
     private final Clock clock;
+    private final StatisticsRecorder statistics;
 
     public WatcherScanner(StoragePool storagePool, TenantManager tenants, ImportedFileHistory history, Clock clock) {
+        this(storagePool, tenants, history, clock, new NoopStatisticsRecorder(clock));
+    }
+
+    public WatcherScanner(
+            StoragePool storagePool,
+            TenantManager tenants,
+            ImportedFileHistory history,
+            Clock clock,
+            StatisticsRecorder statistics) {
         this.storagePool = Objects.requireNonNull(storagePool, "storagePool");
         this.tenants = Objects.requireNonNull(tenants, "tenants");
         this.history = Objects.requireNonNull(history, "history");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.statistics = Objects.requireNonNull(statistics, "statistics");
     }
 
     public WatcherScanResult scan(WatcherConfiguration configuration) {
@@ -123,6 +136,7 @@ public final class WatcherScanner {
                     tenant,
                     new PathContentSource(source, stable.size()),
                     WriteOptions.ofOriginalFileName(sourceFileName.toString()));
+            statistics.recordWatcherImport(configuration.watcherId(), tenant.tenantId(), stable.size());
             history.recordImported(
                     configuration.watcherId(), source, stable.size(), stable.modifiedAtMillis(), fileKey, false);
             try {

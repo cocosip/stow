@@ -110,6 +110,41 @@ class StorageMaintenanceTest {
     }
 
     @Test
+    void durableDeleteRequestIsNotReportedAsFailedWhenProjectionTemporarilyFails() throws Exception {
+        Path root = Files.createTempDirectory(Path.of("target"), "maintenance-projection-failure-");
+        Path mount = root.resolve("volume");
+        Path physical = mount.resolve(TENANT).resolve(KEY + ".bin");
+        Files.createDirectories(physical.getParent());
+        Files.writeString(physical, "payload");
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(root.resolve("metadata"), SqliteConnectionFactory.defaults(), clock);
+        SqliteQuotaRepository quota = new SqliteQuotaRepository(
+                root.resolve("quota"), SqliteConnectionFactory.defaults(), clock, ignored -> 10);
+        UUID lease = UUID.randomUUID();
+        TestJournal journal = new TestJournal(List.of(
+                event(1, QueueEventType.ACCEPTED, FileProcessingStatus.PENDING, null, physical),
+                event(2, QueueEventType.PROCESSING_STARTED, FileProcessingStatus.PROCESSING, lease, physical),
+                event(3, QueueEventType.PROCESSING_COMPLETED, FileProcessingStatus.COMPLETED, lease, physical)));
+        quota.reserve(TENANT, KEY, "/");
+        QueueProjectionService projection = projection(root, journal, metadata, quota, clock);
+        projection.projectTenantUntilCaughtUp(TENANT, 32);
+        CompletedFileReaper reaper = new CompletedFileReaper(
+                journal, metadata, projection, List.of(new TestVolume("volume-a", mount)), clock);
+        journal.failNextTerminalRead = true;
+
+        assertThat(reaper.run(java.time.Duration.ZERO, 100).failedCount()).isZero();
+        assertThat(journal.events)
+                .filteredOn(event -> event.eventType() == QueueEventType.DELETE_REQUESTED)
+                .hasSize(1);
+        assertThat(physical).exists();
+
+        projection.projectTenantUntilCaughtUp(TENANT, 32);
+        assertThat(reaper.run(java.time.Duration.ZERO, 100).succeededCount()).isEqualTo(1);
+        assertThat(physical).doesNotExist();
+    }
+
+    @Test
     void moveToDeadLetterCompletesAndRetriesAfterEventAppendFailure() throws Exception {
         Path root = Files.createTempDirectory(Path.of("target"), "dead-letter-");
         Path mount = root.resolve("volume");
@@ -304,6 +339,7 @@ class StorageMaintenanceTest {
     private static final class TestJournal implements QueueEventJournal {
         private final List<QueueEventRecord> events = new ArrayList<>();
         private boolean failNextAppend;
+        private boolean failNextTerminalRead;
 
         private TestJournal(List<QueueEventRecord> initial) {
             events.addAll(initial);
@@ -325,12 +361,18 @@ class StorageMaintenanceTest {
             if (start >= events.size())
                 return new JournalReadBatch(tenantId, offset, events.size(), lastSequence(), List.of());
             List<QueueEventRecord> selected = events.subList(start, Math.min(events.size(), start + maxRecords));
-            return new JournalReadBatch(
+            JournalReadBatch batch = new JournalReadBatch(
                     tenantId,
                     offset,
                     offset + selected.size(),
                     selected.get(selected.size() - 1).sequenceNumber(),
                     selected);
+            if (failNextTerminalRead
+                    && selected.stream().anyMatch(event -> event.eventType() == QueueEventType.DELETE_REQUESTED)) {
+                failNextTerminalRead = false;
+                throw new IllegalStateException("injected projection read failure");
+            }
+            return batch;
         }
 
         @Override

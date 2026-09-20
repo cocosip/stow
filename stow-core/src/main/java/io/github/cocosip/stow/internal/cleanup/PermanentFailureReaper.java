@@ -1,6 +1,7 @@
 package io.github.cocosip.stow.internal.cleanup;
 
 import io.github.cocosip.stow.config.PermanentlyFailedDisposition;
+import io.github.cocosip.stow.internal.journal.SequencedJournalAppender;
 import io.github.cocosip.stow.internal.projection.QueueProjectionService;
 import io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore;
 import io.github.cocosip.stow.model.CleanupStatistics;
@@ -39,13 +40,23 @@ public final class PermanentFailureReaper {
             QueueProjectionService projection,
             List<StorageVolume> volumes,
             Clock clock) {
+        this(journal, metadata, projection, volumes, clock, new SequencedJournalAppender(journal));
+    }
+
+    public PermanentFailureReaper(
+            QueueEventJournal journal,
+            SqliteMetadataProjectionStore metadata,
+            QueueProjectionService projection,
+            List<StorageVolume> volumes,
+            Clock clock,
+            SequencedJournalAppender appender) {
         this.journal = Objects.requireNonNull(journal, "journal");
         this.metadata = Objects.requireNonNull(metadata, "metadata");
         this.projection = Objects.requireNonNull(projection, "projection");
         this.volumes = Objects.requireNonNull(volumes, "volumes").stream()
                 .collect(Collectors.toUnmodifiableMap(StorageVolume::id, Function.identity()));
         this.clock = Objects.requireNonNull(clock, "clock");
-        appender = new MaintenanceEventAppender(journal);
+        this.appender = new MaintenanceEventAppender(appender);
     }
 
     public CleanupStatistics run(
@@ -81,7 +92,7 @@ public final class PermanentFailureReaper {
                         delete(row, volume);
                     }
                     appender.append(event(row));
-                    projection.projectTenantUntilCaughtUp(tenantId, 256);
+                    project(tenantId);
                     statistics.succeeded(tenantId, row.fileSize());
                 } catch (RuntimeException exception) {
                     statistics.failed(tenantId, "permanent-failure", exception);
@@ -89,6 +100,14 @@ public final class PermanentFailureReaper {
             }
         }
         return statistics.build();
+    }
+
+    private void project(String tenantId) {
+        try {
+            projection.projectTenantUntilCaughtUp(tenantId, 256);
+        } catch (RuntimeException ignored) {
+            // Journal admission is durable; background projection will retry from its cursor.
+        }
     }
 
     private StorageVolume volume(SqliteMetadataProjectionStore.FileRow row) {

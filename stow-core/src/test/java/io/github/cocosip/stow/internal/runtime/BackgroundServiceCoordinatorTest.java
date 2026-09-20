@@ -10,6 +10,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 class BackgroundServiceCoordinatorTest {
@@ -52,6 +56,38 @@ class BackgroundServiceCoordinatorTest {
 
         assertThatThrownBy(coordinator::start).isInstanceOf(IllegalStateException.class);
         assertThat(events).containsExactly("start:projector", "start:watcher", "close:projector");
+    }
+
+    @Test
+    void waitsForRunningPeriodicActionBeforeCloseReturns() throws Exception {
+        CountDownLatch actionStarted = new CountDownLatch(1);
+        CountDownLatch releaseAction = new CountDownLatch(1);
+        try (var scheduler = Executors.newSingleThreadScheduledExecutor();
+                var closer = Executors.newSingleThreadExecutor()) {
+            var service = BackgroundServiceCoordinator.periodic(
+                    "cleanup",
+                    scheduler,
+                    () -> {
+                        actionStarted.countDown();
+                        try {
+                            releaseAction.await();
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                        }
+                    },
+                    java.time.Duration.ZERO,
+                    java.time.Duration.ofDays(1));
+            service.start();
+            assertThat(actionStarted.await(1, TimeUnit.SECONDS)).isTrue();
+
+            var close = closer.submit(service::close);
+            try {
+                assertThatThrownBy(() -> close.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+            } finally {
+                releaseAction.countDown();
+            }
+            close.get(1, TimeUnit.SECONDS);
+        }
     }
 
     @Test

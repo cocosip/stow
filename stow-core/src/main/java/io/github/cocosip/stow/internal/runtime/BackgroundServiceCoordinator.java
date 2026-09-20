@@ -1,5 +1,6 @@
 package io.github.cocosip.stow.internal.runtime;
 
+import io.github.cocosip.stow.exception.StowInterruptedException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -76,6 +77,8 @@ public final class BackgroundServiceCoordinator implements AutoCloseable {
         private final java.time.Duration initialDelay;
         private final java.time.Duration interval;
         private ScheduledFuture<?> future;
+        private boolean closing;
+        private Thread runningThread;
 
         private PeriodicService(
                 String name,
@@ -91,18 +94,44 @@ public final class BackgroundServiceCoordinator implements AutoCloseable {
         }
 
         @Override
-        public void start() {
+        public synchronized void start() {
+            closing = false;
             future = scheduler.scheduleWithFixedDelay(
-                    action, initialDelay.toMillis(), interval.toMillis(), TimeUnit.MILLISECONDS);
+                    this::runAction, initialDelay.toMillis(), interval.toMillis(), TimeUnit.MILLISECONDS);
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
+            closing = true;
             if (future != null) future.cancel(false);
+            while (runningThread != null && runningThread != Thread.currentThread()) {
+                try {
+                    wait();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new StowInterruptedException(
+                            "Interrupted while stopping background service " + name, exception);
+                }
+            }
         }
 
         public String name() {
             return name;
+        }
+
+        private void runAction() {
+            synchronized (this) {
+                if (closing) return;
+                runningThread = Thread.currentThread();
+            }
+            try {
+                action.run();
+            } finally {
+                synchronized (this) {
+                    runningThread = null;
+                    notifyAll();
+                }
+            }
         }
 
         private static java.time.Duration requireNonNegative(java.time.Duration value, String name) {

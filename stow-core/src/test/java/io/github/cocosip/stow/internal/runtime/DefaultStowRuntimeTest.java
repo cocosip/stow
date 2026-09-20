@@ -1,15 +1,23 @@
 package io.github.cocosip.stow.internal.runtime;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import io.github.cocosip.stow.RuntimeState;
 import io.github.cocosip.stow.Stow;
 import io.github.cocosip.stow.StowRuntime;
+import io.github.cocosip.stow.api.ContentSources;
 import io.github.cocosip.stow.config.StowConfiguration;
+import io.github.cocosip.stow.config.VolumeConfiguration;
 import io.github.cocosip.stow.exception.RuntimeDirectoryLockedException;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
+import io.github.cocosip.stow.model.HealthStatus;
+import io.github.cocosip.stow.model.PostImportAction;
+import io.github.cocosip.stow.model.StatisticsQuery;
+import io.github.cocosip.stow.model.WatcherConfiguration;
+import io.github.cocosip.stow.model.WatcherTenantMode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -259,6 +267,158 @@ class DefaultStowRuntimeTest {
         assertThat(closed).containsExactly("third", "second", "first");
     }
 
+    @Test
+    void startsConfiguredWatcherPollingWithoutManualScan() throws Exception {
+        Path root = temporaryDirectory.resolve("background-watcher");
+        Path inbox = root.resolve("inbox");
+        Files.createDirectories(inbox);
+        Path source = inbox.resolve("image.dcm");
+        Files.write(source, new byte[] {1, 2, 3});
+        WatcherConfiguration watcher = new WatcherConfiguration(
+                "watcher-a",
+                "tenant-a",
+                WatcherTenantMode.SINGLE_TENANT,
+                false,
+                inbox,
+                true,
+                false,
+                List.of("*.dcm"),
+                PostImportAction.DELETE,
+                null,
+                Duration.ofMillis(10),
+                0,
+                Duration.ZERO,
+                Duration.ZERO,
+                1,
+                1,
+                Duration.ofDays(1),
+                Duration.ZERO);
+        StowConfiguration configuration = configurationWithVolume(root)
+                .watchers(List.of(watcher))
+                .preconfiguredTenants(List.of("tenant-a"))
+                .statisticsEnabled(true)
+                .build();
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            assertThat(runtime.fileWatcherManager().find("watcher-a")).isPresent();
+            await().atMost(Duration.ofSeconds(3))
+                    .untilAsserted(() -> assertThat(source).doesNotExist());
+            var statistics = runtime.statisticsReader()
+                    .snapshot(new StatisticsQuery(
+                            Instant.now().minusSeconds(60), Instant.now().plusSeconds(60), null, null, null, null));
+            assertThat(statistics.watcherImportedCount()).isEqualTo(1);
+            assertThat(statistics.watcherImportedBytes()).isEqualTo(3);
+        }
+    }
+
+    @Test
+    void reportsWatcherPollingFailureAsDegradedHealth() {
+        Path root = temporaryDirectory.resolve("watcher-health");
+        WatcherConfiguration watcher = new WatcherConfiguration(
+                "watcher-a",
+                "tenant-a",
+                WatcherTenantMode.SINGLE_TENANT,
+                false,
+                root.resolve("missing-inbox"),
+                true,
+                false,
+                List.of("*.dcm"),
+                PostImportAction.KEEP,
+                null,
+                Duration.ofMillis(10),
+                0,
+                Duration.ZERO,
+                Duration.ZERO,
+                1,
+                1,
+                Duration.ofDays(1),
+                Duration.ZERO);
+        StowConfiguration configuration = configurationWithVolume(root)
+                .watchers(List.of(watcher))
+                .preconfiguredTenants(List.of("tenant-a"))
+                .build();
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> assertThat(
+                            runtime.health().components().get("watcher").status())
+                    .isEqualTo(HealthStatus.DEGRADED));
+        }
+    }
+
+    @Test
+    void reclaimsTimedOutLeaseUsingConfiguredBackgroundCleanup() {
+        Path root = temporaryDirectory.resolve("background-timeout");
+        StowConfiguration configuration = configurationWithVolume(root)
+                .preconfiguredTenants(List.of("tenant-a"))
+                .cleanupInitialDelay(Duration.ZERO)
+                .cleanupInterval(Duration.ofMillis(10))
+                .processingTimeout(Duration.ofMillis(1))
+                .build();
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            var tenant = runtime.tenantManager().get("tenant-a");
+            runtime.storagePool().write(tenant, ContentSources.of(new byte[] {1}), null);
+            assertThat(runtime.storagePool().claimNext(tenant)).isPresent();
+
+            await().atMost(Duration.ofSeconds(3))
+                    .untilAsserted(() ->
+                            assertThat(runtime.storagePool().claimNext(tenant)).isPresent());
+        }
+    }
+
+    @Test
+    void recordsRuntimeOperationsAndReportsLiveVolumeHealth() throws Exception {
+        Path root = temporaryDirectory.resolve("runtime-observability");
+        StowConfiguration configuration = configurationWithVolume(root)
+                .preconfiguredTenants(List.of("tenant-a"))
+                .statisticsEnabled(true)
+                .cleanupEnabled(false)
+                .build();
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            var tenant = runtime.tenantManager().get("tenant-a");
+            String fileKey = runtime.storagePool().write(tenant, ContentSources.of(new byte[] {1, 2, 3}), null);
+            try (var content = runtime.storagePool().read(tenant, fileKey)) {
+                assertThat(content.readAllBytes()).containsExactly(1, 2, 3);
+            }
+            var lease = runtime.storagePool().claimNext(tenant).orElseThrow().lease();
+            runtime.storagePool().complete(lease);
+
+            var statistics = runtime.statisticsReader()
+                    .snapshot(new StatisticsQuery(
+                            Instant.now().minusSeconds(60), Instant.now().plusSeconds(60), null, null, null, null));
+            assertThat(statistics.writtenFileCount()).isEqualTo(1);
+            assertThat(statistics.writtenBytes()).isEqualTo(3);
+            assertThat(statistics.readCount()).isEqualTo(1);
+            assertThat(statistics.claimCount()).isEqualTo(1);
+            assertThat(statistics.completedCount()).isEqualTo(1);
+            assertThat(statistics.sqlitePersistenceOperationCount()).isEqualTo(3);
+            assertThat(runtime.health().components()).containsKeys("runtime", "projection", "volume:volume-a");
+        }
+    }
+
+    @Test
+    void rebuildsTerminalLeaseIndexAcrossRuntimeRestart() {
+        Path root = temporaryDirectory.resolve("terminal-lease-restart");
+        StowConfiguration configuration = configurationWithVolume(root)
+                .preconfiguredTenants(List.of("tenant-a"))
+                .cleanupEnabled(false)
+                .build();
+        io.github.cocosip.stow.model.ProcessingLease completedLease;
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            var tenant = runtime.tenantManager().get("tenant-a");
+            runtime.storagePool().write(tenant, ContentSources.of(new byte[] {1}), null);
+            completedLease =
+                    runtime.storagePool().claimNext(tenant).orElseThrow().lease();
+            runtime.storagePool().complete(completedLease);
+        }
+
+        try (StowRuntime reopened = Stow.open(configuration)) {
+            assertThatCode(() -> reopened.storagePool().complete(completedLease))
+                    .doesNotThrowAnyException();
+        }
+    }
+
     private StowConfiguration configuration(String name) {
         Path root = temporaryDirectory.resolve(name);
         return StowConfiguration.builder()
@@ -267,6 +427,16 @@ class DefaultStowRuntimeTest {
                 .queueDirectory(root.resolve("queue"))
                 .watcherDirectory(root.resolve("watchers"))
                 .build();
+    }
+
+    private StowConfiguration.Builder configurationWithVolume(Path root) {
+        return StowConfiguration.builder()
+                .metadataDirectory(root.resolve("metadata"))
+                .quotaDirectory(root.resolve("quota"))
+                .queueDirectory(root.resolve("queue"))
+                .watcherDirectory(root.resolve("watchers"))
+                .defaultQuota(10)
+                .volumes(List.of(new VolumeConfiguration("volume-a", root.resolve("volume"), 0, 8_192, true)));
     }
 
     private static Set<Long> stowThreadIds() {
