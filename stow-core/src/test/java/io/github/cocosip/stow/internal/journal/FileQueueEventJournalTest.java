@@ -213,7 +213,7 @@ class FileQueueEventJournalTest {
             channel.write(ByteBuffer.wrap(new byte[] {0}));
         }
         String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
-        Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java.exe");
+        Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java");
         Process process = new ProcessBuilder(
                         javaExecutable.toString(),
                         "-Xmx32m",
@@ -231,6 +231,12 @@ class FileQueueEventJournalTest {
 
     private static JournalConfiguration configuration(JournalAckMode mode) {
         return configuration(mode, 8);
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "")
+                .toLowerCase(java.util.Locale.ROOT)
+                .contains("win");
     }
 
     private static JournalConfiguration configuration(JournalAckMode mode, int capacity) {
