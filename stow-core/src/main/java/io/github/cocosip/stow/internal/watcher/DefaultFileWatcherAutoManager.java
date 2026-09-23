@@ -123,10 +123,15 @@ public final class DefaultFileWatcherAutoManager implements FileWatcherAutoManag
 
     private static String watcherId(Path root, String tenantId) {
         try {
-            byte[] digest =
-                    MessageDigest.getInstance("SHA-256").digest(root.toString().getBytes(StandardCharsets.UTF_8));
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(root.toString().getBytes(StandardCharsets.UTF_8));
+            // the tenantId must be part of the digest: the readable suffix is truncated, and
+            // tenants sharing a prefix must not collide onto one watcher
+            digest.update((byte) 0);
+            digest.update(tenantId.getBytes(StandardCharsets.UTF_8));
+            byte[] hashBytes = digest.digest();
             StringBuilder hash = new StringBuilder();
-            for (int index = 0; index < 6; index++) hash.append(String.format("%02x", digest[index]));
+            for (int index = 0; index < 6; index++) hash.append(String.format("%02x", hashBytes[index]));
             String suffix = tenantId.length() > 110 ? tenantId.substring(0, 110) : tenantId;
             return "auto-" + hash + "-" + suffix;
         } catch (NoSuchAlgorithmException exception) {

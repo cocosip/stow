@@ -21,9 +21,13 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Public watcher configuration facade backed by durable state. */
 public final class DefaultFileWatcherManager implements FileWatcherManager, AutoCloseable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DefaultFileWatcherManager.class);
 
     private final WatcherConfigurationStore store;
     private final WatcherScanner scanner;
@@ -158,6 +162,16 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
     }
 
     private void poll() {
+        try {
+            pollOnce();
+        } catch (RuntimeException exception) {
+            // scheduleWithFixedDelay cancels all future executions after an uncaught exception;
+            // store-level failures (corrupt state files) must not permanently kill polling
+            LOG.warn("Watcher polling round failed; continuing with next round", exception);
+        }
+    }
+
+    private void pollOnce() {
         if (!running.get() || !options.get().enabled()) return;
         List<WatcherConfiguration> enabled =
                 list().stream().filter(WatcherConfiguration::enabled).toList();

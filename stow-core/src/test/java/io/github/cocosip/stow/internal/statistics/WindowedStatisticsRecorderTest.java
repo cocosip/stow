@@ -82,6 +82,53 @@ class WindowedStatisticsRecorderTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void unfilteredSnapshotCountsEachSeriesOnce() {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-19T00:00:00Z"), ZoneOffset.UTC);
+        WindowedStatisticsRecorder recorder = new WindowedStatisticsRecorder(
+                clock, Duration.ofMinutes(1), Duration.ofMinutes(5), 32, EnumSet.of(StatisticDimension.OPERATION));
+        recorder.recordWrite("tenant-a", "volume-a", 100);
+        recorder.recordWrite("tenant-a", "volume-a", 100);
+        recorder.recordRead("tenant-a", "volume-a");
+        StatisticsSnapshot snapshot = recorder.snapshot(
+                new StatisticsQuery(Instant.EPOCH, clock.instant().plusSeconds(60), null, null, null, null));
+        assertThat(snapshot.series().get("operation=write")).isEqualTo(2);
+        assertThat(snapshot.series().get("operation=read")).isEqualTo(1);
+        assertThat(snapshot.writtenFileCount()).isEqualTo(2);
+        assertThat(snapshot.readCount()).isEqualTo(1);
+    }
+
+    @Test
+    void filteredQueryMatchesWholeDimensionValuesOnly() {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-19T00:00:00Z"), ZoneOffset.UTC);
+        WindowedStatisticsRecorder recorder = new WindowedStatisticsRecorder(
+                clock,
+                Duration.ofMinutes(1),
+                Duration.ofMinutes(5),
+                32,
+                EnumSet.of(StatisticDimension.OPERATION, StatisticDimension.TENANT));
+        recorder.recordWrite("tenant-a", "volume-a", 10);
+        recorder.recordWrite("tenant-a10", "volume-a", 10);
+        StatisticsSnapshot snapshot = recorder.snapshot(
+                new StatisticsQuery(Instant.EPOCH, clock.instant().plusSeconds(60), "tenant-a", null, null, "write"));
+        assertThat(snapshot.series()).hasSize(1);
+        assertThat(snapshot.series().get("operation=write|tenant=tenant-a")).isEqualTo(1);
+        assertThat(snapshot.writtenFileCount()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectedSeriesRecordKeepsTotalsConsistentWithSeries() {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-19T00:00:00Z"), ZoneOffset.UTC);
+        WindowedStatisticsRecorder recorder = new WindowedStatisticsRecorder(
+                clock, Duration.ofMinutes(1), Duration.ofMinutes(5), 1, EnumSet.of(StatisticDimension.TENANT));
+        assertThat(recorder.recordRead("tenant-a", "volume-a")).isTrue();
+        assertThat(recorder.recordRead("tenant-b", "volume-a")).isFalse();
+        StatisticsSnapshot snapshot = recorder.snapshot(
+                new StatisticsQuery(Instant.EPOCH, clock.instant().plusSeconds(60), null, null, null, null));
+        assertThat(snapshot.readCount()).isEqualTo(1);
+        assertThat(snapshot.series().get("tenant=tenant-a")).isEqualTo(1);
+    }
+
     private static final class MutableClock extends Clock {
         private Instant instant;
 

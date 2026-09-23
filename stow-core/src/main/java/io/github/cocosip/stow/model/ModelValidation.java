@@ -1,6 +1,8 @@
 package io.github.cocosip.stow.model;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -60,13 +62,21 @@ final class ModelValidation {
         if (value.indexOf('\\') >= 0 || value.indexOf('\0') >= 0) {
             throw invalid("logicalDirectory", "contains a forbidden character");
         }
-        String normalized = value.startsWith("/") ? value : "/" + value;
-        for (String segment : normalized.split("/")) {
+        // canonicalize so "docs", "/docs", "docs/", and "docs//." all map to one quota key "/docs"
+        List<String> segments = new ArrayList<>();
+        for (String segment : value.split("/", -1)) {
+            if (segment.isEmpty() || segment.equals(".")) {
+                continue;
+            }
             if (segment.equals("..") || segment.chars().anyMatch(Character::isISOControl)) {
                 throw invalid("logicalDirectory", "contains an unsafe segment");
             }
+            segments.add(segment);
         }
-        return normalized;
+        if (segments.isEmpty()) {
+            return "/";
+        }
+        return "/" + String.join("/", segments);
     }
 
     static String fileName(String value) {

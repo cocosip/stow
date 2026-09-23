@@ -18,8 +18,6 @@ import java.util.regex.Pattern;
 /** Bounded, in-memory, fixed-bucket statistics aggregation. */
 public final class WindowedStatisticsRecorder implements StatisticsRecorder {
 
-    private static final String TOTAL_LABELS = "all";
-
     private static final Pattern DIMENSION_VALUE = Pattern.compile("[A-Za-z0-9._-]{1,128}");
     private final Clock clock;
     private final long windowMillis;
@@ -89,19 +87,21 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
                 .toList();
         Counters aggregate = new Counters();
         Map<String, Long> series = new java.util.LinkedHashMap<>();
+        boolean filtered = queryHasFilter(query);
         for (Bucket bucket : selected) {
-            if (matchesQuery(TOTAL_LABELS, query)) aggregate.add(bucket.total);
-            for (Map.Entry<String, Series> entry : bucket.series.entrySet()) {
-                if (!matchesQuery(entry.getKey(), query)) continue;
-                Series value = entry.getValue();
-                series.merge(entry.getKey(), value.operations.sum(), Long::sum);
-                if (queryHasFilter(query)) aggregate.add(value.counters);
-            }
-        }
-        if (!queryHasFilter(query)) {
-            for (Bucket bucket : selected) {
-                for (Map.Entry<String, Series> entry : bucket.series.entrySet()) {
-                    series.merge(entry.getKey(), entry.getValue().operations.sum(), Long::sum);
+            synchronized (bucket) {
+                if (!filtered) {
+                    aggregate.add(bucket.total);
+                    for (Map.Entry<String, Series> entry : bucket.series.entrySet()) {
+                        series.merge(entry.getKey(), entry.getValue().operations.sum(), Long::sum);
+                    }
+                } else {
+                    for (Map.Entry<String, Series> entry : bucket.series.entrySet()) {
+                        if (!matchesQuery(entry.getKey(), query)) continue;
+                        Series value = entry.getValue();
+                        series.merge(entry.getKey(), value.operations.sum(), Long::sum);
+                        aggregate.add(value.counters);
+                    }
                 }
             }
         }
@@ -132,13 +132,13 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
         Bucket bucket = buckets.computeIfAbsent(bucketStart(now), Bucket::new);
         String label = label(operation, tenantId, volumeId, watcherId);
         synchronized (bucket) {
-            metric.add(bucket.total, bytes);
             Series series = bucket.series.get(label);
             if (series == null) {
                 if (bucket.series.size() >= maxSeries) return false;
                 series = new Series();
                 bucket.series.put(label, series);
             }
+            metric.add(bucket.total, bytes);
             metric.add(series.counters, bytes);
             series.operations.increment();
             return true;
@@ -157,10 +157,12 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
 
     private boolean matchesQuery(String label, StatisticsQuery query) {
         if (!queryHasFilter(query)) return true;
-        if (query.tenantId() != null && !label.contains("tenant=" + query.tenantId())) return false;
-        if (query.volumeId() != null && !label.contains("volume=" + query.volumeId())) return false;
-        if (query.watcherId() != null && !label.contains("watcher=" + query.watcherId())) return false;
-        if (query.operation() != null && !label.contains("operation=" + query.operation())) return false;
+        // exact segment match: "tenant=t1" must not satisfy a query for "tenant=t10"
+        Set<String> segments = Set.of(label.split("\\|", -1));
+        if (query.tenantId() != null && !segments.contains("tenant=" + query.tenantId())) return false;
+        if (query.volumeId() != null && !segments.contains("volume=" + query.volumeId())) return false;
+        if (query.watcherId() != null && !segments.contains("watcher=" + query.watcherId())) return false;
+        if (query.operation() != null && !segments.contains("operation=" + query.operation())) return false;
         return true;
     }
 

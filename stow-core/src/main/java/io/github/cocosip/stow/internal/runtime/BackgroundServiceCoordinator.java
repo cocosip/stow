@@ -8,9 +8,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Owns ordered background services and guarantees reverse-order shutdown. */
 public final class BackgroundServiceCoordinator implements AutoCloseable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(BackgroundServiceCoordinator.class);
 
     private final List<Service> services;
     private final AtomicBoolean started = new AtomicBoolean();
@@ -126,6 +130,10 @@ public final class BackgroundServiceCoordinator implements AutoCloseable {
             }
             try {
                 action.run();
+            } catch (RuntimeException exception) {
+                // scheduleWithFixedDelay suppresses all future executions after an uncaught
+                // exception; log and keep the schedule alive
+                LOG.error("Background service {} failed; continuing", name, exception);
             } finally {
                 synchronized (this) {
                     runningThread = null;

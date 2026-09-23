@@ -24,10 +24,13 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Append-only import history with atomic pruning and post-action retry state. */
 public final class ImportedFileHistory {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ImportedFileHistory.class);
     private static final Pattern ID = Pattern.compile("[A-Za-z0-9._-]{1,128}");
     private final Path directory;
     private final Clock clock;
@@ -126,7 +129,10 @@ public final class ImportedFileHistory {
             byte[] bytes = (mapper.writeValueAsString(entry) + "\n").getBytes(StandardCharsets.UTF_8);
             try (FileChannel channel = FileChannel.open(
                     file, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
-                channel.write(java.nio.ByteBuffer.wrap(bytes));
+                java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer);
+                }
                 channel.force(true);
             }
         } catch (IOException exception) {
@@ -140,15 +146,30 @@ public final class ImportedFileHistory {
         validateWatcherId(watcherId);
         Path file = historyPath(watcherId);
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return List.of();
-        try {
-            List<HistoryEntry> entries = new ArrayList<>();
-            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
-                if (!line.isBlank()) entries.add(mapper.readValue(line, HistoryEntry.class));
-            }
-            return entries;
-        } catch (IOException | RuntimeException exception) {
+        List<String> lines;
+        try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            // malformed bytes decode to U+FFFD instead of throwing; a torn final line then fails JSON parsing below
+            lines = reader.lines().toList();
+        } catch (IOException exception) {
             throw new IllegalStateException("Unable to read watcher history", exception);
         }
+        List<HistoryEntry> entries = new ArrayList<>(lines.size());
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
+            if (line.isBlank()) continue;
+            try {
+                entries.add(mapper.readValue(line, HistoryEntry.class));
+            } catch (IOException | RuntimeException exception) {
+                // a crash between write and force can tear the final line; losing that one dedup
+                // entry is benign (the file may be re-imported once), mid-file corruption is not
+                if (i == lines.size() - 1) {
+                    LOG.warn("Ignoring torn final watcher history line in {}", file, exception);
+                    break;
+                }
+                throw new IllegalStateException("Unable to read watcher history", exception);
+            }
+        }
+        return entries;
     }
 
     private void writeEntries(String watcherId, List<HistoryEntry> entries) {
@@ -168,7 +189,10 @@ public final class ImportedFileHistory {
                     .getBytes(StandardCharsets.UTF_8);
             try (FileChannel channel =
                     FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                channel.write(java.nio.ByteBuffer.wrap(bytes));
+                java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer);
+                }
                 channel.force(true);
             }
             java.nio.file.Files.move(

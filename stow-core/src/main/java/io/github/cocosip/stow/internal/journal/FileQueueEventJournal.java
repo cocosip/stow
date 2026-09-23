@@ -58,9 +58,16 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             }
             previousSequence = tenant.admittedSequence;
             tenant.admittedSequence = event.sequenceNumber();
-            ensureWriter(tenant);
-            writer = tenant.writer;
-            completion = writer.enqueue(List.of(event));
+            try {
+                ensureWriter(tenant);
+                writer = tenant.writer;
+                completion = writer.enqueue(List.of(event));
+            } catch (RuntimeException exception) {
+                // roll back admission on every pre-write failure, otherwise the sequence is
+                // permanently stuck and every later append fails as a "gap"
+                tenant.admittedSequence = previousSequence;
+                throw exception;
+            }
         }
         try {
             if (configuration.ackMode() != io.github.cocosip.stow.config.JournalAckMode.ASYNC) {
@@ -102,9 +109,16 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                 }
             }
             tenant.admittedSequence = expected - 1;
-            ensureWriter(tenant);
-            writer = tenant.writer;
-            completion = writer.enqueue(events);
+            try {
+                ensureWriter(tenant);
+                writer = tenant.writer;
+                completion = writer.enqueue(events);
+            } catch (RuntimeException exception) {
+                // roll back admission on every pre-write failure, otherwise the sequence is
+                // permanently stuck and every later append fails as a "gap"
+                tenant.admittedSequence = previousSequence;
+                throw exception;
+            }
         }
         try {
             if (configuration.ackMode() != io.github.cocosip.stow.config.JournalAckMode.ASYNC) {
@@ -188,6 +202,9 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         Path log;
         synchronized (tenant) {
             ensureOpen(tenant);
+            if (tenant.compacting) {
+                throw new IllegalStateException("Journal compaction already in progress for tenant " + tenantId);
+            }
             if (throughOffset < tenant.baseOffset || throughOffset > tenant.tailOffset) {
                 throw new IllegalArgumentException("compaction offset is outside journal bounds");
             }
@@ -196,34 +213,45 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             }
             writer = tenant.writer;
             tenant.writer = null;
+            tenant.compacting = true;
             previousBase = tenant.baseOffset;
             log = tenant.directory.resolve("queue.log");
         }
-        if (writer != null) {
-            writer.flush();
-            writer.close();
-        }
-        synchronized (tenant) {
-            Path temp = tenant.directory.resolve(".queue.log.compact.tmp");
-            try {
-                copySuffix(log, temp, throughOffset - previousBase);
-                Files.move(
-                        temp,
-                        log,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException exception) {
-                throw new DatabaseRecoveryException("Unable to compact journal", exception);
-            } finally {
-                try {
-                    Files.deleteIfExists(temp);
-                } catch (IOException ignored) {
-                    // Best effort cleanup.
-                }
+        try {
+            // outside the monitor: writer.close() joins the worker, whose result callback
+            // re-enters the tenant monitor
+            if (writer != null) {
+                writer.flush();
+                writer.close();
             }
-            tenant.baseOffset = throughOffset;
-            tenant.tailOffset = tenant.baseOffset + FilesSize(log);
-            persistState(tenant, false, -1);
+            synchronized (tenant) {
+                Path temp = tenant.directory.resolve(".queue.log.compact.tmp");
+                try {
+                    copySuffix(log, temp, throughOffset - previousBase);
+                    Files.move(
+                            temp,
+                            log,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    forceDirectory(tenant.directory);
+                } catch (IOException exception) {
+                    throw new DatabaseRecoveryException("Unable to compact journal", exception);
+                } finally {
+                    try {
+                        Files.deleteIfExists(temp);
+                    } catch (IOException ignored) {
+                        // Best effort cleanup.
+                    }
+                }
+                tenant.baseOffset = throughOffset;
+                tenant.tailOffset = tenant.baseOffset + FilesSize(log);
+                persistState(tenant, false, -1);
+            }
+        } finally {
+            synchronized (tenant) {
+                tenant.compacting = false;
+                tenant.notifyAll();
+            }
         }
     }
 
@@ -344,6 +372,18 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                 tenant.tailOffset = state.tailOffset();
                 tenant.repairCount = state.repairCount();
                 persistState(tenant, false, -1);
+            } else if (state != null
+                    && state.format() == tenantCodec.format()
+                    && state.tailOffset() >= state.baseOffset()
+                    && result.physicalLength() > state.tailOffset() - state.baseOffset()
+                    && result.lastSequenceNumber() >= state.lastSequenceNumber()) {
+                // the log grew after the last state persist (crash between the append and the
+                // state write): reset-to-zero would shift the whole logical offset space and
+                // silently stall the projection cursor, so adopt the persisted base offset
+                tenant.baseOffset = state.baseOffset();
+                tenant.tailOffset = state.baseOffset() + result.physicalLength();
+                tenant.repairCount = state.repairCount();
+                persistState(tenant, false, -1);
             }
         } catch (IOException | RuntimeException ignored) {
             // State is an acceleration file; the physical log remains authoritative.
@@ -367,6 +407,16 @@ public final class FileQueueEventJournal implements QueueEventJournal {
     }
 
     private void ensureWriter(TenantLog tenant) {
+        while (tenant.compacting) {
+            // the queue.log file is about to be replaced; writing to a handle opened now would
+            // target the orphaned inode after the atomic move
+            try {
+                tenant.wait();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting for journal compaction", exception);
+            }
+        }
         if (tenant.writer == null) {
             tenant.writer = new TenantJournalWriter(
                     tenant.tenantId,
@@ -433,6 +483,14 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         }
     }
 
+    private static void forceDirectory(Path directory) {
+        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Directory fsync is not available on every supported platform.
+        }
+    }
+
     private static void copySuffix(Path sourcePath, Path targetPath, long startOffset) throws IOException {
         try (FileChannel source = FileChannel.open(sourcePath, StandardOpenOption.READ);
                 FileChannel target = FileChannel.open(
@@ -470,6 +528,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         private long lastSequence;
         private long admittedSequence;
         private long repairCount;
+        private boolean compacting;
         private JournalCorruptionException failure;
         private TenantJournalWriter writer;
 

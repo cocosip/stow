@@ -40,7 +40,8 @@ class FileWatcherAutoManagerTest {
                 incoming, true, true, true, List.of("**/*.dcm"), PostImportAction.KEEP, null);
 
         assertThat(auto.apply(configuration)).isEqualTo(2);
-        assertThat(manager.list()).extracting("tenantId").containsExactly("tenant-a", "tenant-b");
+        // list() orders by watcherId whose hash now includes the tenantId, so order is not alphabetical
+        assertThat(manager.list()).extracting("tenantId").containsExactlyInAnyOrder("tenant-a", "tenant-b");
         assertThat(auto.currentRoot()).contains(configuration);
         auto.removeManagedWatchers();
         assertThat(manager.list()).isEmpty();

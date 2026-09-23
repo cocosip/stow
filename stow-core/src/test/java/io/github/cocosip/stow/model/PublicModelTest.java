@@ -110,6 +110,20 @@ class PublicModelTest {
         assertThat(event.errorMessage()).hasSize(4_096);
     }
 
+    @Test
+    void canonicalizesLogicalDirectoryToASingleQuotaKey() {
+        // "docs", "/docs", "docs/", and "docs//." must all map to one directory-quota key
+        assertThat(new WriteOptions(null, "docs").logicalDirectory()).isEqualTo("/docs");
+        assertThat(new WriteOptions(null, "/docs").logicalDirectory()).isEqualTo("/docs");
+        assertThat(new WriteOptions(null, "docs/").logicalDirectory()).isEqualTo("/docs");
+        assertThat(new WriteOptions(null, "docs//./sub").logicalDirectory())
+                .isEqualTo(new WriteOptions(null, "/docs/sub").logicalDirectory());
+        assertThat(new DirectoryQuota("tenant-1", "docs///", 0, 10, true).logicalDirectory())
+                .isEqualTo("/docs");
+        assertThat(new WriteOptions(null, " ").logicalDirectory()).isEqualTo("/");
+        assertThatThrownBy(() -> new WriteOptions(null, "docs/../secret")).isInstanceOf(IllegalArgumentException.class);
+    }
+
     @ParameterizedTest(name = "enforces public string limit: {0}")
     @MethodSource("oversizedNamesAndExtensions")
     void enforcesFileNameAndExtensionLimits(String description, Runnable constructorCall) {

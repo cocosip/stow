@@ -215,7 +215,7 @@ final class LocalFileSystemVolume implements StorageVolume {
     }
 
     private long writeSecure(SecureParent parent, InputStream content) throws IOException {
-        Path temporaryName = temporaryName(parent.fileName());
+        Path temporaryName = temporaryName();
         try {
             long length;
             try (SeekableByteChannel channel = parent.directory()
@@ -240,8 +240,7 @@ final class LocalFileSystemVolume implements StorageVolume {
 
     private long writeFallback(Path destination, InputStream content) throws IOException {
         Path parent = Objects.requireNonNull(destination.getParent(), "storage target parent");
-        Path fileName = Objects.requireNonNull(destination.getFileName(), "storage target file name");
-        Path temporary = parent.resolve(temporaryName(fileName));
+        Path temporary = parent.resolve(temporaryName());
         try {
             long length;
             try (FileChannel channel = FileChannel.open(
@@ -476,11 +475,12 @@ final class LocalFileSystemVolume implements StorageVolume {
         }
     }
 
-    private static Path temporaryName(Path targetFileName) {
-        return targetFileName
-                .getFileSystem()
-                .getPath("." + targetFileName + "."
-                        + UUID.randomUUID().toString().toLowerCase() + ".tmp");
+    private static Path temporaryName() {
+        // must match TEMPORARY_FILE_NAME: deriving the name from the pool-level temporary
+        // (which already starts with ".") produced ".."-prefixed files that startup cleanup
+        // could never recognize, leaking them forever after a crash mid-write
+        String randomness = UUID.randomUUID().toString().replace("-", "");
+        return Path.of("." + randomness + "." + UUID.randomUUID() + ".tmp");
     }
 
     private static boolean isStorageTemporaryFile(Path fileName) {

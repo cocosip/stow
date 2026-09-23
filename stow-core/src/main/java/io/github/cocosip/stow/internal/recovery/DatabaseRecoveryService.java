@@ -45,7 +45,24 @@ public final class DatabaseRecoveryService {
         SqliteMetadataProjectionStore metadata = new SqliteMetadataProjectionStore(metadataRoot, sqlite, clock);
         SqliteQuotaRepository quota = new SqliteQuotaRepository(quotaRoot, sqlite, clock, initialLimit);
         QueueEventReducer reducer = new QueueEventReducer(metadata, quota);
-        long offset = journal.baseOffset(tenantId), tail = journal.tailOffset(tenantId);
+        // seed from the compaction snapshot: events below the journal base offset no longer
+        // exist in the log, so replaying the log alone would silently drop those files
+        var snapshot =
+                new io.github.cocosip.stow.internal.projection.ProjectionSnapshotStore(metadataRoot).load(tenantId);
+        long offset;
+        if (snapshot != null) {
+            if (snapshot.baseOffset() != journal.baseOffset(tenantId)) {
+                throw new IllegalStateException("snapshot base does not match journal base for tenant " + tenantId);
+            }
+            for (var event : snapshot.events()) {
+                reducer.applyMetadataOnly(event);
+                scanned++;
+            }
+            offset = snapshot.nextOffset();
+        } else {
+            offset = journal.baseOffset(tenantId);
+        }
+        long tail = journal.tailOffset(tenantId);
         while (offset < tail) {
             var batch = journal.readBatch(tenantId, offset, 256);
             if (batch.events().isEmpty() || batch.nextOffset() <= offset) break;
@@ -81,6 +98,17 @@ public final class DatabaseRecoveryService {
             Path backup =
                     database.resolveSibling(database.getFileName() + ".corrupt." + System.currentTimeMillis() + ".bak");
             Files.move(database, backup, StandardCopyOption.REPLACE_EXISTING);
+            // move the WAL sidecars too: SQLite would replay a stale -wal into the freshly
+            // created database on next open, resurrecting the rows being replaced
+            for (String suffix : new String[] {"-wal", "-shm"}) {
+                Path sidecar = database.resolveSibling(database.getFileName() + suffix);
+                if (Files.exists(sidecar)) {
+                    Files.move(
+                            sidecar,
+                            backup.resolveSibling(backup.getFileName() + suffix),
+                            StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
         } catch (IOException exception) {
             throw new IllegalStateException("Unable to preserve corrupted database", exception);
         }

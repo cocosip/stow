@@ -248,17 +248,26 @@ public final class DefaultStoragePool implements StoragePool {
                         "." + finalPath.getFileName() + "." + java.util.UUID.randomUUID() + ".tmp");
                 compensation.selected(volume, temporary, finalPath);
                 InputStream opened = opener.open();
+                RuntimeException bodyFailure = null;
                 try {
                     CountingInputStream counted =
                             opened instanceof CountingInputStream c ? c : new CountingInputStream(opened);
                     volume.write(temporary, counted);
                     fileSize = counted.count();
+                } catch (RuntimeException failure) {
+                    bodyFailure = failure;
+                    throw failure;
                 } finally {
                     if (closeStream) {
                         try {
                             opened.close();
                         } catch (java.io.IOException exception) {
-                            throw new java.io.UncheckedIOException("Unable to close content stream", exception);
+                            // a close failure while unwinding must not mask the real write failure
+                            if (bodyFailure != null) {
+                                bodyFailure.addSuppressed(exception);
+                            } else {
+                                throw new java.io.UncheckedIOException("Unable to close content stream", exception);
+                            }
                         }
                     }
                 }
@@ -343,7 +352,17 @@ public final class DefaultStoragePool implements StoragePool {
                         new PhysicalFileMissingException("Storage volume is unavailable: " + location.volumeId()));
         try {
             InputStream content = volume.read(location.physicalPath());
-            statistics.recordRead(tenant.tenantId(), volume.id());
+            try {
+                statistics.recordRead(tenant.tenantId(), volume.id());
+            } catch (RuntimeException exception) {
+                // never leak the opened stream because a statistics recorder failed
+                try {
+                    content.close();
+                } catch (java.io.IOException suppressed) {
+                    exception.addSuppressed(suppressed);
+                }
+                throw exception;
+            }
             return content;
         } catch (StoredFileNotFoundException exception) {
             throw exception;

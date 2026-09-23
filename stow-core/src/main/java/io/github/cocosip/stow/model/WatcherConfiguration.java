@@ -34,10 +34,11 @@ public record WatcherConfiguration(
         }
         ModelValidation.required("watchPath", watchPath);
         watchPath = watchPath.toAbsolutePath().normalize();
-        globs = List.copyOf(ModelValidation.required("globs", globs));
-        if (globs.stream().anyMatch(glob -> glob == null || glob.isBlank())) {
+        // validate before the defensive copy: List.copyOf would throw a bare NPE on null entries
+        if (ModelValidation.required("globs", globs).stream().anyMatch(glob -> glob == null || glob.isBlank())) {
             throw ModelValidation.invalid("globs", "must not contain blank entries");
         }
+        globs = List.copyOf(globs);
         ModelValidation.required("postImportAction", postImportAction);
         if (postImportAction == PostImportAction.MOVE && moveDirectory == null) {
             throw ModelValidation.invalid("moveDirectory", "is required for MOVE");
