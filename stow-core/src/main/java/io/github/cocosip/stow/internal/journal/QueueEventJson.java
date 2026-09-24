@@ -42,7 +42,8 @@ final class QueueEventJson {
             "availableAt",
             "errorMessage",
             "originalFileName",
-            "fileExtension");
+            "fileExtension",
+            "importOperationId");
 
     static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new Jdk8Module())
@@ -104,6 +105,7 @@ final class QueueEventJson {
         putNullable(node, "errorMessage", event.errorMessage());
         putNullable(node, "originalFileName", event.originalFileName());
         putNullable(node, "fileExtension", event.fileExtension());
+        putNullable(node, "importOperationId", event.importOperationId());
         return node;
     }
 
@@ -140,7 +142,8 @@ final class QueueEventJson {
                     nullableInstant(node, "availableAt"),
                     nullableText(node, "errorMessage"),
                     nullableText(node, "originalFileName"),
-                    nullableText(node, "fileExtension"));
+                    nullableText(node, "fileExtension"),
+                    nullableText(node, "importOperationId"));
         } catch (RuntimeException exception) {
             throw new JournalCorruptionException("Invalid queue event fields", exception);
         }

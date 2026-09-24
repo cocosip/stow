@@ -61,6 +61,43 @@ class PublicModelTest {
         assertThat(statistics.errors()).hasSize(1).isUnmodifiable();
     }
 
+    @Test
+    void keepsLegacyWatcherConstructorsAndDefaultsNewCleanupFields() {
+        WatcherConfiguration watcher = new WatcherConfiguration(
+                "watcher-1",
+                "tenant-1",
+                WatcherTenantMode.SINGLE_TENANT,
+                false,
+                Path.of("inbox"),
+                true,
+                true,
+                List.of("**/*.dcm"),
+                PostImportAction.DELETE,
+                null,
+                Duration.ofSeconds(5),
+                1_000_000,
+                Duration.ofSeconds(1),
+                Duration.ofMillis(250),
+                2,
+                4,
+                Duration.ofDays(7),
+                Duration.ofSeconds(1));
+        WatcherRootConfiguration root = new WatcherRootConfiguration(
+                Path.of("inbox"), true, false, true, List.of("**/*.dcm"), PostImportAction.DELETE, null);
+        WatcherScanResult result = new WatcherScanResult("watcher-1", NOW, NOW, 1, 1, 0, 0, 42, List.of());
+
+        assertThat(watcher.sourceCleanupFailureDirectory())
+                .isEqualTo(Path.of("stow-source-failed").toAbsolutePath().normalize());
+        assertThat(watcher.maxPostImportActionAttempts()).isEqualTo(5);
+        assertThat(watcher.postImportRetryInitialDelay()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(watcher.postImportRetryMaxDelay()).isEqualTo(Duration.ofMinutes(5));
+        assertThat(root.sourceCleanupFailureDirectory())
+                .isEqualTo(Path.of("stow-source-failed").toAbsolutePath().normalize());
+        assertThat(result.postImportActionsRetried()).isZero();
+        assertThat(result.filesQuarantined()).isZero();
+        assertThat(result.importsDeferred()).isZero();
+    }
+
     @ParameterizedTest(name = "validates required field: {0}")
     @MethodSource("invalidRequiredFields")
     void validatesRequiredRecordFields(String description, Runnable constructorCall) {

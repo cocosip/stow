@@ -12,6 +12,9 @@ public record WatcherScanResult(
         long skippedCount,
         long failedCount,
         long importedBytes,
+        long postImportActionsRetried,
+        long filesQuarantined,
+        long importsDeferred,
         List<MaintenanceError> errors) {
 
     public WatcherScanResult {
@@ -26,6 +29,34 @@ public record WatcherScanResult(
         ModelValidation.nonNegative("skippedCount", skippedCount);
         ModelValidation.nonNegative("failedCount", failedCount);
         ModelValidation.nonNegative("importedBytes", importedBytes);
+        ModelValidation.nonNegative("postImportActionsRetried", postImportActionsRetried);
+        ModelValidation.nonNegative("filesQuarantined", filesQuarantined);
+        ModelValidation.nonNegative("importsDeferred", importsDeferred);
         errors = List.copyOf(ModelValidation.required("errors", errors));
+    }
+
+    public WatcherScanResult(
+            String watcherId,
+            Instant startedAt,
+            Instant finishedAt,
+            long discoveredCount,
+            long importedCount,
+            long skippedCount,
+            long failedCount,
+            long importedBytes,
+            List<MaintenanceError> errors) {
+        this(
+                watcherId,
+                startedAt,
+                finishedAt,
+                discoveredCount,
+                importedCount,
+                skippedCount,
+                failedCount,
+                importedBytes,
+                0,
+                0,
+                0,
+                errors);
     }
 }

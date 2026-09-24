@@ -1,6 +1,7 @@
 package io.github.cocosip.stow.internal.scheduler;
 
 import io.github.cocosip.stow.api.ContentSource;
+import io.github.cocosip.stow.api.IdempotentStoragePool;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.config.RetryConfiguration;
@@ -41,8 +42,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
-public final class DefaultStoragePool implements StoragePool {
+public final class DefaultStoragePool implements StoragePool, IdempotentStoragePool {
 
     @FunctionalInterface
     public interface TenantLookup {
@@ -60,6 +63,8 @@ public final class DefaultStoragePool implements StoragePool {
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
     private final StripedFileLock fileLocks = new StripedFileLock();
+    private final StripedFileLock idempotentWriteLocks = new StripedFileLock();
+    private final ConcurrentMap<String, String> operationFileKeys = new ConcurrentHashMap<>();
     private final TerminalLeaseIndex terminalLeases;
     private final RetryDelayCalculator retryDelays;
 
@@ -213,14 +218,38 @@ public final class DefaultStoragePool implements StoragePool {
         Objects.requireNonNull(content, "content");
         requireEnabled(tenant);
         return writeInternal(
-                tenant, () -> new CountingInputStream(content), OptionalLong.empty(), false, false, options);
+                tenant, () -> new CountingInputStream(content), OptionalLong.empty(), false, false, options, null);
     }
 
     @Override
     public String write(TenantContext tenant, ContentSource content, WriteOptions options) {
         Objects.requireNonNull(content, "content");
         requireEnabled(tenant);
-        return writeInternal(tenant, content::openStream, content.length(), content.repeatable(), true, options);
+        return writeInternal(tenant, content::openStream, content.length(), content.repeatable(), true, options, null);
+    }
+
+    @Override
+    public String writeIdempotently(
+            TenantContext tenant, ContentSource content, WriteOptions options, String operationId) {
+        Objects.requireNonNull(content, "content");
+        requireEnabled(tenant);
+        if (operationId == null || operationId.isBlank() || operationId.length() > 256) {
+            throw new IllegalArgumentException("operationId must contain between 1 and 256 characters");
+        }
+        String operationKey = tenant.tenantId() + '\0' + operationId;
+        return idempotentWriteLocks.withLock(operationKey, () -> {
+            String cached = operationFileKeys.get(operationKey);
+            if (cached != null) return cached;
+            Optional<SqliteMetadataProjectionStore.FileRow> projected =
+                    metadata.findByImportOperationId(tenant.tenantId(), operationId);
+            if (projected.isPresent()) {
+                String fileKey = projected.orElseThrow().fileKey();
+                operationFileKeys.put(operationKey, fileKey);
+                return fileKey;
+            }
+            return writeInternal(
+                    tenant, content::openStream, content.length(), content.repeatable(), true, options, operationId);
+        });
     }
 
     private String writeInternal(
@@ -229,7 +258,8 @@ public final class DefaultStoragePool implements StoragePool {
             OptionalLong knownLength,
             boolean repeatable,
             boolean closeStream,
-            WriteOptions suppliedOptions) {
+            WriteOptions suppliedOptions,
+            String importOperationId) {
         WriteOptions options = suppliedOptions == null ? WriteOptions.defaults() : suppliedOptions;
         String fileKey = nextFileKey();
         String logicalDirectory = options.logicalDirectory() == null ? "/" : options.logicalDirectory();
@@ -306,12 +336,16 @@ public final class DefaultStoragePool implements StoragePool {
                 null,
                 null,
                 options.originalFileName(),
-                extension);
+                extension,
+                importOperationId);
         try {
             appender.append(accepted);
         } catch (RuntimeException failure) {
             compensation.cleanupAfterFailure();
             throw failure;
+        }
+        if (importOperationId != null) {
+            operationFileKeys.put(tenant.tenantId() + '\0' + importOperationId, fileKey);
         }
         projectBestEffort(tenant.tenantId(), 128);
         statistics.recordWrite(tenant.tenantId(), selected.id(), fileSize);
@@ -446,7 +480,8 @@ public final class DefaultStoragePool implements StoragePool {
                     null,
                     null,
                     row.originalFileName(),
-                    row.fileExtension()));
+                    row.fileExtension(),
+                    row.importOperationId()));
         }
         boolean appended = false;
         try {
@@ -618,7 +653,8 @@ public final class DefaultStoragePool implements StoragePool {
                 availableAt,
                 errorMessage,
                 row.originalFileName(),
-                row.fileExtension());
+                row.fileExtension(),
+                row.importOperationId());
     }
 
     private void appendTransition(String tenantId, QueueEventRecord event) {

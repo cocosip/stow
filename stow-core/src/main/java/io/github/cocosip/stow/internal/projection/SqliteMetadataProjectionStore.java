@@ -47,6 +47,7 @@ public final class SqliteMetadataProjectionStore {
                 original_file_name TEXT,
                 file_extension TEXT,
                 metadata_json TEXT,
+                import_operation_id TEXT,
                 last_event_sequence INTEGER NOT NULL,
                 row_version INTEGER NOT NULL DEFAULT 0
             )
@@ -61,7 +62,9 @@ public final class SqliteMetadataProjectionStore {
             "CREATE INDEX idx_files_status_available ON files(status, available_at_ms, created_at_ms, file_key)",
             "CREATE INDEX idx_files_status_completed ON files(status, completed_at_ms, file_key)",
             "CREATE INDEX idx_files_status_failed ON files(status, last_failed_at_ms, file_key)",
-            "CREATE UNIQUE INDEX idx_files_physical_path ON files(physical_path)");
+            "CREATE UNIQUE INDEX idx_files_physical_path ON files(physical_path)",
+            "CREATE UNIQUE INDEX idx_files_import_operation ON files(tenant_id, import_operation_id) "
+                    + "WHERE import_operation_id IS NOT NULL");
 
     private final SqliteConnectionFactory connections;
     private final SqliteSchemaManager schema = new SqliteSchemaManager(1);
@@ -85,7 +88,7 @@ public final class SqliteMetadataProjectionStore {
         ReentrantLock lock = lockFor(tenantId);
         lock.lock();
         try (Connection connection = connections.open(tenantId)) {
-            schema.ensureSchema(connection, CREATE_STATEMENTS);
+            ensureSchema(connection);
             connection.setAutoCommit(false);
             try {
                 T result = operation.run(connection);
@@ -110,7 +113,7 @@ public final class SqliteMetadataProjectionStore {
         ReentrantLock lock = lockFor(tenantId);
         lock.lock();
         try (Connection connection = connections.open(tenantId)) {
-            schema.ensureSchema(connection, CREATE_STATEMENTS);
+            ensureSchema(connection);
             return operation.run(connection);
         } catch (SQLException exception) {
             throw new DatabaseRecoveryException("Unable to access metadata database for tenant " + tenantId, exception);
@@ -123,6 +126,19 @@ public final class SqliteMetadataProjectionStore {
         return read(tenantId, connection -> {
             try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM files WHERE file_key=?")) {
                 statement.setString(1, fileKey);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? Optional.of(readRow(result)) : Optional.empty();
+                }
+            }
+        });
+    }
+
+    public Optional<FileRow> findByImportOperationId(String tenantId, String operationId) {
+        return read(tenantId, connection -> {
+            try (PreparedStatement statement =
+                    connection.prepareStatement("SELECT * FROM files WHERE tenant_id=? AND import_operation_id=?")) {
+                statement.setString(1, tenantId);
+                statement.setString(2, operationId);
                 try (ResultSet result = statement.executeQuery()) {
                     return result.next() ? Optional.of(readRow(result)) : Optional.empty();
                 }
@@ -330,6 +346,7 @@ public final class SqliteMetadataProjectionStore {
             String originalFileName,
             String fileExtension,
             String metadataJson,
+            String importOperationId,
             long lastEventSequence,
             long rowVersion) {}
 
@@ -357,6 +374,7 @@ public final class SqliteMetadataProjectionStore {
                 result.getString("original_file_name"),
                 result.getString("file_extension"),
                 result.getString("metadata_json"),
+                result.getString("import_operation_id"),
                 result.getLong("last_event_sequence"),
                 result.getLong("row_version"));
     }
@@ -364,6 +382,27 @@ public final class SqliteMetadataProjectionStore {
     private static Long nullable(ResultSet result, String name) throws SQLException {
         long value = result.getLong(name);
         return result.wasNull() ? null : value;
+    }
+
+    private void ensureSchema(Connection connection) throws SQLException {
+        schema.ensureSchema(connection, CREATE_STATEMENTS);
+        boolean hasImportOperationId = false;
+        try (var statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("PRAGMA table_info(files)")) {
+            while (result.next()) {
+                if ("import_operation_id".equals(result.getString("name"))) {
+                    hasImportOperationId = true;
+                    break;
+                }
+            }
+        }
+        try (var statement = connection.createStatement()) {
+            if (!hasImportOperationId) {
+                statement.execute("ALTER TABLE files ADD COLUMN import_operation_id TEXT");
+            }
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_files_import_operation "
+                    + "ON files(tenant_id, import_operation_id) WHERE import_operation_id IS NOT NULL");
+        }
     }
 
     private static Optional<FileRow> find(Connection connection, String fileKey) throws SQLException {

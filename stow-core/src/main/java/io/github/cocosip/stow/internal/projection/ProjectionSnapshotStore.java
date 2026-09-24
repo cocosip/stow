@@ -151,7 +151,8 @@ public final class ProjectionSnapshotStore {
             Instant availableAt,
             String errorMessage,
             String originalFileName,
-            String fileExtension) {
+            String fileExtension,
+            String importOperationId) {
         static EventDocument from(QueueEventRecord event) {
             return new EventDocument(
                     event.schemaVersion(),
@@ -172,7 +173,8 @@ public final class ProjectionSnapshotStore {
                     event.availableAt(),
                     event.errorMessage(),
                     event.originalFileName(),
-                    event.fileExtension());
+                    event.fileExtension(),
+                    event.importOperationId());
         }
 
         QueueEventRecord toEvent() {
@@ -195,7 +197,8 @@ public final class ProjectionSnapshotStore {
                     availableAt,
                     errorMessage,
                     originalFileName,
-                    fileExtension);
+                    fileExtension,
+                    importOperationId);
         }
     }
 }

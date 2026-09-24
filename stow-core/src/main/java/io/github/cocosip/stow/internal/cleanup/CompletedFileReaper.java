@@ -147,6 +147,7 @@ public final class CompletedFileReaper {
                 null,
                 null,
                 row.originalFileName(),
-                row.fileExtension());
+                row.fileExtension(),
+                row.importOperationId());
     }
 }

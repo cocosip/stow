@@ -83,6 +83,17 @@ stow:
     enabled: true
   metrics:
     enabled: true
+  source-cleanup:
+    enabled: true
+    database-path: ./sample-data/watchers/source-cleanup.db
+    poll-interval: 5s
+    max-concurrent-actions: 2
+    max-active-jobs: 10000
+    terminal-retention: 1d
+    import-reservation-timeout: 10m
+    database-optimization-enabled: true
+    database-optimization-interval: 1d
+    terminal-prune-batch-size: 5000
   volumes:
     - id: primary
       mount-path: ./sample-data/volume
@@ -109,3 +120,7 @@ stow:
       concurrent-imports: 1
       history-retention: 7d
       history-flush-interval: 1s
+      source-cleanup-failure-directory: ./sample-data/failed
+      max-post-import-action-attempts: 5
+      post-import-retry-initial-delay: 5s
+      post-import-retry-max-delay: 5m

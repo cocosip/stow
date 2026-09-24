@@ -22,7 +22,13 @@ public record WatcherConfiguration(
         int stabilityCheckCount,
         int concurrentImports,
         Duration historyRetention,
-        Duration historyFlushInterval) {
+        Duration historyFlushInterval,
+        Path sourceCleanupFailureDirectory,
+        int maxPostImportActionAttempts,
+        Duration postImportRetryInitialDelay,
+        Duration postImportRetryMaxDelay) {
+
+    private static final Path DEFAULT_FAILURE_DIRECTORY = Path.of("stow-source-failed");
 
     public WatcherConfiguration {
         watcherId = ModelValidation.identifier("watcherId", watcherId);
@@ -54,5 +60,59 @@ public record WatcherConfiguration(
         ModelValidation.positive("concurrentImports", concurrentImports);
         ModelValidation.nonNegative("historyRetention", historyRetention);
         ModelValidation.nonNegative("historyFlushInterval", historyFlushInterval);
+        if (sourceCleanupFailureDirectory != null) {
+            sourceCleanupFailureDirectory =
+                    sourceCleanupFailureDirectory.toAbsolutePath().normalize();
+        }
+        ModelValidation.positive("maxPostImportActionAttempts", maxPostImportActionAttempts);
+        ModelValidation.nonNegative("postImportRetryInitialDelay", postImportRetryInitialDelay);
+        ModelValidation.nonNegative("postImportRetryMaxDelay", postImportRetryMaxDelay);
+        if (postImportRetryMaxDelay.compareTo(postImportRetryInitialDelay) < 0) {
+            throw ModelValidation.invalid("postImportRetryMaxDelay", "must not be less than initial delay");
+        }
+    }
+
+    public WatcherConfiguration(
+            String watcherId,
+            String tenantId,
+            WatcherTenantMode tenantMode,
+            boolean autoCreateTenantDirectories,
+            Path watchPath,
+            boolean enabled,
+            boolean recursive,
+            List<String> globs,
+            PostImportAction postImportAction,
+            Path moveDirectory,
+            Duration pollInterval,
+            long maxFileSize,
+            Duration minimumFileAge,
+            Duration stabilityCheckInterval,
+            int stabilityCheckCount,
+            int concurrentImports,
+            Duration historyRetention,
+            Duration historyFlushInterval) {
+        this(
+                watcherId,
+                tenantId,
+                tenantMode,
+                autoCreateTenantDirectories,
+                watchPath,
+                enabled,
+                recursive,
+                globs,
+                postImportAction,
+                moveDirectory,
+                pollInterval,
+                maxFileSize,
+                minimumFileAge,
+                stabilityCheckInterval,
+                stabilityCheckCount,
+                concurrentImports,
+                historyRetention,
+                historyFlushInterval,
+                DEFAULT_FAILURE_DIRECTORY,
+                5,
+                Duration.ofSeconds(5),
+                Duration.ofMinutes(5));
     }
 }

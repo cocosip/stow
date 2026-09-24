@@ -300,15 +300,24 @@ recovery failure enters FAILED or read-only maintenance mode.
 ## 17. File Watchers
 
 Watchers poll instead of relying solely on `WatchService`, so network mounts,
-container volumes, and lost events remain discoverable. They support
-registration, persistence, single- and multi-tenant discovery, recursive and
-glob filters, size/age and stability checks, bounded import concurrency,
-DELETE/MOVE/KEEP post-actions, durable import history, debounce, retention,
-and counters.
+container volumes, and lost events remain discoverable. Each watcher keeps its
+own due time from `pollInterval`; a slow watcher does not delay faster watchers.
+Manual and background scans share one exclusive slot per watcher, while the
+global `maxParallelScans` limit bounds scans across different watchers.
 
-Import order is stability check, `StoragePool.write`, durable history, then the
-post-import action. A post-action failure never causes duplicate import; the
-next scan retries the action using history.
+When durable source cleanup is active, import order is strong fingerprint,
+bounded reservation, idempotent storage write, cleanup activation, then
+statistics. The worker performs DELETE/MOVE asynchronously with fingerprint
+revalidation, capped exponential retry, optional quarantine, stale import
+reservation recovery, terminal pruning, and bounded SQLite maintenance. Queue
+capacity applies backpressure before storage is written.
+
+The worker gate is the conjunction of source-cleanup enabled, global watcher
+enabled, and at least one enabled watcher configuration. A false gate performs
+no cleanup-store operation, including reservation recovery, pruning, or
+database optimization. Compatibility mode retains import history, but only
+new strong-fingerprint entries may suppress an import or authorize a source
+action; legacy size-and-time entries remain readable but are not trusted.
 
 ## 18. Statistics, Health, And Logging
 

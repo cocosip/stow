@@ -162,6 +162,44 @@ class JournalCodecTest {
         assertThat(json.encode(EVENT)).isEqualTo(jsonFixture);
         assertThat(binary.decode(binaryFixture)).isEqualTo(EVENT);
         assertThat(json.decode(jsonFixture)).isEqualTo(EVENT);
+        assertThat(binary.decode(binaryFixture).importOperationId()).isNull();
+        assertThat(json.decode(jsonFixture).importOperationId()).isNull();
+    }
+
+    @Test
+    void roundTripsImportOperationIdWithoutWritingNullFields() {
+        QueueEventRecord event = new QueueEventRecord(
+                EVENT.schemaVersion(),
+                EVENT.eventId(),
+                EVENT.tenantId(),
+                EVENT.fileKey(),
+                QueueEventType.ACCEPTED,
+                EVENT.occurredAt(),
+                EVENT.sequenceNumber(),
+                EVENT.volumeId(),
+                EVENT.physicalPath(),
+                EVENT.logicalDirectory(),
+                EVENT.fileSize(),
+                FileProcessingStatus.PENDING,
+                null,
+                null,
+                0,
+                null,
+                null,
+                EVENT.originalFileName(),
+                EVENT.fileExtension(),
+                "import-1");
+
+        assertThat(new BinaryV1JournalCodec()
+                        .decode(new BinaryV1JournalCodec().encode(event))
+                        .importOperationId())
+                .isEqualTo("import-1");
+        assertThat(new JsonLinesJournalCodec()
+                        .decode(new JsonLinesJournalCodec().encode(event))
+                        .importOperationId())
+                .isEqualTo("import-1");
+        assertThat(new String(QueueEventJson.encode(EVENT), StandardCharsets.UTF_8))
+                .doesNotContain("importOperationId");
     }
 
     @Test

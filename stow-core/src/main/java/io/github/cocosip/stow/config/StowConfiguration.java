@@ -19,6 +19,7 @@ public record StowConfiguration(
         CompactionConfiguration compaction,
         CleanupConfiguration cleanup,
         OrphanRecoveryConfiguration orphanRecovery,
+        SourceCleanupConfiguration sourceCleanup,
         StatisticsConfiguration statistics,
         List<WatcherConfiguration> watchers) {
 
@@ -35,11 +36,47 @@ public record StowConfiguration(
         ConfigurationValidation.nonNull("compaction", compaction);
         ConfigurationValidation.nonNull("cleanup", cleanup);
         ConfigurationValidation.nonNull("orphanRecovery", orphanRecovery);
+        ConfigurationValidation.nonNull("sourceCleanup", sourceCleanup);
         ConfigurationValidation.nonNull("statistics", statistics);
         ConfigurationValidation.nonNull("volumes", volumes);
         ConfigurationValidation.nonNull("watchers", watchers);
         volumes = List.copyOf(volumes);
         watchers = List.copyOf(watchers);
+    }
+
+    public StowConfiguration(
+            PathsConfiguration paths,
+            TenantConfiguration tenant,
+            List<VolumeConfiguration> volumes,
+            MetadataConfiguration metadata,
+            StorageConfiguration storage,
+            SqliteConfiguration sqlite,
+            RetryConfiguration retry,
+            JournalConfiguration journal,
+            ProjectionConfiguration projection,
+            SnapshotConfiguration snapshot,
+            CompactionConfiguration compaction,
+            CleanupConfiguration cleanup,
+            OrphanRecoveryConfiguration orphanRecovery,
+            StatisticsConfiguration statistics,
+            List<WatcherConfiguration> watchers) {
+        this(
+                paths,
+                tenant,
+                volumes,
+                metadata,
+                storage,
+                sqlite,
+                retry,
+                journal,
+                projection,
+                snapshot,
+                compaction,
+                cleanup,
+                orphanRecovery,
+                defaultSourceCleanup(paths.watcherDirectory()),
+                statistics,
+                watchers);
     }
 
     public static Builder builder() {
@@ -109,6 +146,16 @@ public record StowConfiguration(
         private boolean orphanRecoveryEnabled;
         private boolean orphanRecoveryRunOnStartup;
         private Duration orphanRecoveryInterval = Duration.ofHours(6);
+        private boolean sourceCleanupEnabled = true;
+        private Path sourceCleanupDatabasePath;
+        private Duration sourceCleanupPollInterval = Duration.ofSeconds(5);
+        private int sourceCleanupMaxConcurrentActions = 2;
+        private int sourceCleanupMaxActiveJobs = 10_000;
+        private Duration sourceCleanupTerminalRetention = Duration.ofDays(1);
+        private Duration sourceCleanupImportReservationTimeout = Duration.ofMinutes(10);
+        private boolean sourceCleanupDatabaseOptimizationEnabled = true;
+        private Duration sourceCleanupDatabaseOptimizationInterval = Duration.ofDays(1);
+        private int sourceCleanupTerminalPruneBatchSize = 5_000;
         private boolean statisticsEnabled;
         private Duration statisticsWindowSize = Duration.ofMinutes(5);
         private Duration statisticsRetention = Duration.ofHours(1);
@@ -417,6 +464,56 @@ public record StowConfiguration(
             return this;
         }
 
+        public Builder sourceCleanupEnabled(boolean value) {
+            sourceCleanupEnabled = value;
+            return this;
+        }
+
+        public Builder sourceCleanupDatabasePath(Path value) {
+            sourceCleanupDatabasePath = value;
+            return this;
+        }
+
+        public Builder sourceCleanupPollInterval(Duration value) {
+            sourceCleanupPollInterval = value;
+            return this;
+        }
+
+        public Builder sourceCleanupMaxConcurrentActions(int value) {
+            sourceCleanupMaxConcurrentActions = value;
+            return this;
+        }
+
+        public Builder sourceCleanupMaxActiveJobs(int value) {
+            sourceCleanupMaxActiveJobs = value;
+            return this;
+        }
+
+        public Builder sourceCleanupTerminalRetention(Duration value) {
+            sourceCleanupTerminalRetention = value;
+            return this;
+        }
+
+        public Builder sourceCleanupImportReservationTimeout(Duration value) {
+            sourceCleanupImportReservationTimeout = value;
+            return this;
+        }
+
+        public Builder sourceCleanupDatabaseOptimizationEnabled(boolean value) {
+            sourceCleanupDatabaseOptimizationEnabled = value;
+            return this;
+        }
+
+        public Builder sourceCleanupDatabaseOptimizationInterval(Duration value) {
+            sourceCleanupDatabaseOptimizationInterval = value;
+            return this;
+        }
+
+        public Builder sourceCleanupTerminalPruneBatchSize(int value) {
+            sourceCleanupTerminalPruneBatchSize = value;
+            return this;
+        }
+
         public Builder statisticsEnabled(boolean value) {
             statisticsEnabled = value;
             return this;
@@ -499,9 +596,36 @@ public record StowConfiguration(
                             cleanupBatchSizePerTenant),
                     new OrphanRecoveryConfiguration(
                             orphanRecoveryEnabled, orphanRecoveryRunOnStartup, orphanRecoveryInterval),
+                    new SourceCleanupConfiguration(
+                            sourceCleanupEnabled,
+                            sourceCleanupDatabasePath == null
+                                    ? watcherDirectory.resolve("source-cleanup.db")
+                                    : sourceCleanupDatabasePath,
+                            sourceCleanupPollInterval,
+                            sourceCleanupMaxConcurrentActions,
+                            sourceCleanupMaxActiveJobs,
+                            sourceCleanupTerminalRetention,
+                            sourceCleanupImportReservationTimeout,
+                            sourceCleanupDatabaseOptimizationEnabled,
+                            sourceCleanupDatabaseOptimizationInterval,
+                            sourceCleanupTerminalPruneBatchSize),
                     new StatisticsConfiguration(
                             statisticsEnabled, statisticsWindowSize, statisticsRetention, statisticsMaxSeries),
                     watchers);
         }
+    }
+
+    private static SourceCleanupConfiguration defaultSourceCleanup(Path watcherDirectory) {
+        return new SourceCleanupConfiguration(
+                true,
+                watcherDirectory.resolve("source-cleanup.db"),
+                Duration.ofSeconds(5),
+                2,
+                10_000,
+                Duration.ofDays(1),
+                Duration.ofMinutes(10),
+                true,
+                Duration.ofDays(1),
+                5_000);
     }
 }

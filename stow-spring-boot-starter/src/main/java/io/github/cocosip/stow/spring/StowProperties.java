@@ -37,6 +37,7 @@ public class StowProperties {
     private final CompactionProperties compaction = new CompactionProperties();
     private final CleanupProperties cleanup = new CleanupProperties();
     private final OrphanRecoveryProperties orphanRecovery = new OrphanRecoveryProperties();
+    private final SourceCleanupProperties sourceCleanup = new SourceCleanupProperties();
     private final StatisticsProperties statistics = new StatisticsProperties();
     private final ActuatorProperties actuator = new ActuatorProperties();
     private final MetricsProperties metrics = new MetricsProperties();
@@ -107,6 +108,16 @@ public class StowProperties {
                 .orphanRecoveryEnabled(orphanRecovery.enabled)
                 .orphanRecoveryRunOnStartup(orphanRecovery.runOnStartup)
                 .orphanRecoveryInterval(orphanRecovery.interval)
+                .sourceCleanupEnabled(sourceCleanup.enabled)
+                .sourceCleanupDatabasePath(sourceCleanup.databasePath)
+                .sourceCleanupPollInterval(sourceCleanup.pollInterval)
+                .sourceCleanupMaxConcurrentActions(sourceCleanup.maxConcurrentActions)
+                .sourceCleanupMaxActiveJobs(sourceCleanup.maxActiveJobs)
+                .sourceCleanupTerminalRetention(sourceCleanup.terminalRetention)
+                .sourceCleanupImportReservationTimeout(sourceCleanup.importReservationTimeout)
+                .sourceCleanupDatabaseOptimizationEnabled(sourceCleanup.databaseOptimizationEnabled)
+                .sourceCleanupDatabaseOptimizationInterval(sourceCleanup.databaseOptimizationInterval)
+                .sourceCleanupTerminalPruneBatchSize(sourceCleanup.terminalPruneBatchSize)
                 .statisticsEnabled(statistics.enabled)
                 .statisticsWindowSize(statistics.windowSize)
                 .statisticsRetention(statistics.retention)
@@ -164,6 +175,10 @@ public class StowProperties {
 
     public OrphanRecoveryProperties getOrphanRecovery() {
         return orphanRecovery;
+    }
+
+    public SourceCleanupProperties getSourceCleanup() {
+        return sourceCleanup;
     }
 
     public StatisticsProperties getStatistics() {
@@ -771,6 +786,99 @@ public class StowProperties {
         }
     }
 
+    public static class SourceCleanupProperties {
+        private boolean enabled = true;
+        private Path databasePath;
+        private Duration pollInterval = Duration.ofSeconds(5);
+        private int maxConcurrentActions = 2;
+        private int maxActiveJobs = 10_000;
+        private Duration terminalRetention = Duration.ofDays(1);
+        private Duration importReservationTimeout = Duration.ofMinutes(10);
+        private boolean databaseOptimizationEnabled = true;
+        private Duration databaseOptimizationInterval = Duration.ofDays(1);
+        private int terminalPruneBatchSize = 5_000;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean value) {
+            enabled = value;
+        }
+
+        public Path getDatabasePath() {
+            return databasePath;
+        }
+
+        public void setDatabasePath(Path value) {
+            databasePath = value;
+        }
+
+        public Duration getPollInterval() {
+            return pollInterval;
+        }
+
+        public void setPollInterval(Duration value) {
+            pollInterval = value;
+        }
+
+        public int getMaxConcurrentActions() {
+            return maxConcurrentActions;
+        }
+
+        public void setMaxConcurrentActions(int value) {
+            maxConcurrentActions = value;
+        }
+
+        public int getMaxActiveJobs() {
+            return maxActiveJobs;
+        }
+
+        public void setMaxActiveJobs(int value) {
+            maxActiveJobs = value;
+        }
+
+        public Duration getTerminalRetention() {
+            return terminalRetention;
+        }
+
+        public void setTerminalRetention(Duration value) {
+            terminalRetention = value;
+        }
+
+        public Duration getImportReservationTimeout() {
+            return importReservationTimeout;
+        }
+
+        public void setImportReservationTimeout(Duration value) {
+            importReservationTimeout = value;
+        }
+
+        public boolean isDatabaseOptimizationEnabled() {
+            return databaseOptimizationEnabled;
+        }
+
+        public void setDatabaseOptimizationEnabled(boolean value) {
+            databaseOptimizationEnabled = value;
+        }
+
+        public Duration getDatabaseOptimizationInterval() {
+            return databaseOptimizationInterval;
+        }
+
+        public void setDatabaseOptimizationInterval(Duration value) {
+            databaseOptimizationInterval = value;
+        }
+
+        public int getTerminalPruneBatchSize() {
+            return terminalPruneBatchSize;
+        }
+
+        public void setTerminalPruneBatchSize(int value) {
+            terminalPruneBatchSize = value;
+        }
+    }
+
     public static class StatisticsProperties {
         private boolean enabled;
         private Duration windowSize = Duration.ofMinutes(5);
@@ -905,6 +1013,10 @@ public class StowProperties {
         private int concurrentImports = 1;
         private Duration historyRetention = Duration.ofDays(7);
         private Duration historyFlushInterval = Duration.ofSeconds(1);
+        private Path sourceCleanupFailureDirectory = Path.of("stow-source-failed");
+        private int maxPostImportActionAttempts = 5;
+        private Duration postImportRetryInitialDelay = Duration.ofSeconds(5);
+        private Duration postImportRetryMaxDelay = Duration.ofMinutes(5);
 
         WatcherConfiguration toConfiguration() {
             return new WatcherConfiguration(
@@ -925,7 +1037,11 @@ public class StowProperties {
                     stabilityCheckCount,
                     concurrentImports,
                     historyRetention,
-                    historyFlushInterval);
+                    historyFlushInterval,
+                    sourceCleanupFailureDirectory,
+                    maxPostImportActionAttempts,
+                    postImportRetryInitialDelay,
+                    postImportRetryMaxDelay);
         }
 
         public String getWatcherId() {
@@ -1070,6 +1186,38 @@ public class StowProperties {
 
         public void setHistoryFlushInterval(Duration value) {
             historyFlushInterval = value;
+        }
+
+        public Path getSourceCleanupFailureDirectory() {
+            return sourceCleanupFailureDirectory;
+        }
+
+        public void setSourceCleanupFailureDirectory(Path value) {
+            sourceCleanupFailureDirectory = value;
+        }
+
+        public int getMaxPostImportActionAttempts() {
+            return maxPostImportActionAttempts;
+        }
+
+        public void setMaxPostImportActionAttempts(int value) {
+            maxPostImportActionAttempts = value;
+        }
+
+        public Duration getPostImportRetryInitialDelay() {
+            return postImportRetryInitialDelay;
+        }
+
+        public void setPostImportRetryInitialDelay(Duration value) {
+            postImportRetryInitialDelay = value;
+        }
+
+        public Duration getPostImportRetryMaxDelay() {
+            return postImportRetryMaxDelay;
+        }
+
+        public void setPostImportRetryMaxDelay(Duration value) {
+            postImportRetryMaxDelay = value;
         }
     }
 }

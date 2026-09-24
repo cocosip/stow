@@ -40,6 +40,8 @@ import io.github.cocosip.stow.internal.tenant.DefaultTenantManager;
 import io.github.cocosip.stow.internal.tenant.JsonTenantRepository;
 import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherAutoManager;
 import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherManager;
+import io.github.cocosip.stow.internal.watcher.SourceCleanupStore;
+import io.github.cocosip.stow.internal.watcher.SourceCleanupWorker;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.RuntimeHealth;
 import io.github.cocosip.stow.spi.JournalCodec;
@@ -91,6 +93,8 @@ public final class DefaultStowRuntime implements StowRuntime {
     private DefaultStorageMaintenance storageMaintenanceService;
     private DefaultFileWatcherManager watcherManagerService;
     private DefaultFileWatcherAutoManager watcherAutoManagerService;
+    private SourceCleanupStore sourceCleanupStore;
+    private SourceCleanupWorker sourceCleanupWorker;
     private DefaultStatisticsReader statisticsReaderService;
     private List<StorageVolume> storageVolumes = List.of();
 
@@ -373,6 +377,7 @@ public final class DefaultStowRuntime implements StowRuntime {
                     tenantId -> ((DefaultTenantManager) tenantManager).quotaLimit(tenantId),
                     timeoutRecovery,
                     appender);
+            sourceCleanupStore = new SourceCleanupStore(configuration.sourceCleanup(), configuration.sqlite(), clock);
             watcherManagerService = new DefaultFileWatcherManager(
                     configuration.paths().watcherDirectory(),
                     storagePoolService,
@@ -384,7 +389,9 @@ public final class DefaultStowRuntime implements StowRuntime {
                             result.failedCount() == 0 ? HealthStatus.UP : HealthStatus.DEGRADED,
                             result.failedCount() == 0
                                     ? "running"
-                                    : result.errors().get(0).summary()));
+                                    : result.errors().get(0).summary()),
+                    configuration.sourceCleanup(),
+                    sourceCleanupStore);
             watcherAutoManagerService = new DefaultFileWatcherAutoManager(
                     configuration.paths().watcherDirectory(), watcherManagerService, tenantManager, clock);
             for (var watcher : configuration.watchers()) {
@@ -394,6 +401,14 @@ public final class DefaultStowRuntime implements StowRuntime {
                     watcherManagerService.register(watcher);
                 }
             }
+            sourceCleanupWorker = new SourceCleanupWorker(
+                    configuration.sourceCleanup(),
+                    sourceCleanupStore,
+                    watcherManagerService.options(),
+                    watcherManagerService,
+                    clock,
+                    workerExecutor,
+                    scheduler);
         }
         replayJournal(cursors);
         runtimeHealth.update("projection", HealthStatus.UP, "ready");
@@ -433,6 +448,19 @@ public final class DefaultStowRuntime implements StowRuntime {
                     monitored("orphan-recovery", storageMaintenanceService::recoverAllOrphans),
                     initialDelay,
                     configuration.orphanRecovery().interval()));
+        }
+        if (sourceCleanupWorker != null) {
+            services.add(new ManagedBackgroundService() {
+                @Override
+                public void start() {
+                    sourceCleanupWorker.start();
+                }
+
+                @Override
+                public void close() {
+                    sourceCleanupWorker.close();
+                }
+            });
         }
         if (watcherManagerService != null) {
             services.add(new ManagedBackgroundService() {

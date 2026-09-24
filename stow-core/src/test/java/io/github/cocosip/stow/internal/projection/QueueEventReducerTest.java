@@ -12,6 +12,7 @@ import io.github.cocosip.stow.model.QueueEventRecord;
 import io.github.cocosip.stow.model.QueueEventType;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.DriverManager;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -68,6 +69,76 @@ class QueueEventReducerTest {
                 .isInstanceOf(ProjectionException.class);
         assertThat(metadata.find(TENANT, KEY)).isEmpty();
         assertThat(quota.reservation(TENANT, KEY)).isPresent();
+    }
+
+    @Test
+    void projectsImportOperationIdFromAcceptedEvent() {
+        SqliteQuotaRepository quota =
+                new SqliteQuotaRepository(temp, SqliteConnectionFactory.defaults(), CLOCK, ignored -> 10);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(temp, SqliteConnectionFactory.defaults(), CLOCK);
+        QueueEventReducer reducer = new QueueEventReducer(metadata, quota);
+        quota.reserve(TENANT, KEY, DIR);
+        QueueEventRecord accepted = event(1, QueueEventType.ACCEPTED, FileProcessingStatus.PENDING, null, null, 0);
+        accepted = new QueueEventRecord(
+                accepted.schemaVersion(),
+                accepted.eventId(),
+                accepted.tenantId(),
+                accepted.fileKey(),
+                accepted.eventType(),
+                accepted.occurredAt(),
+                accepted.sequenceNumber(),
+                accepted.volumeId(),
+                accepted.physicalPath(),
+                accepted.logicalDirectory(),
+                accepted.fileSize(),
+                accepted.status(),
+                accepted.leaseId(),
+                accepted.processingStartedAt(),
+                accepted.retryCount(),
+                accepted.availableAt(),
+                accepted.errorMessage(),
+                accepted.originalFileName(),
+                accepted.fileExtension(),
+                "import-1");
+
+        reducer.apply(accepted);
+
+        assertThat(metadata.findByImportOperationId(TENANT, "import-1"))
+                .get()
+                .extracting(SqliteMetadataProjectionStore.FileRow::fileKey)
+                .isEqualTo(KEY);
+        assertThat(metadata.find(TENANT, KEY))
+                .get()
+                .extracting(SqliteMetadataProjectionStore.FileRow::importOperationId)
+                .isEqualTo("import-1");
+    }
+
+    @Test
+    void migratesExistingMetadataDatabaseBeforeReadingRows() throws Exception {
+        SqliteMetadataProjectionStore original =
+                new SqliteMetadataProjectionStore(temp, SqliteConnectionFactory.defaults(), CLOCK);
+        assertThat(original.find(TENANT, KEY)).isEmpty();
+        Path database = temp.resolve(TENANT).resolve("metadata.db");
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
+                var statement = connection.createStatement()) {
+            statement.execute("DROP INDEX idx_files_import_operation");
+            statement.execute("ALTER TABLE files DROP COLUMN import_operation_id");
+        }
+
+        SqliteMetadataProjectionStore migrated =
+                new SqliteMetadataProjectionStore(temp, SqliteConnectionFactory.defaults(), CLOCK);
+
+        assertThat(migrated.find(TENANT, KEY)).isEmpty();
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + database);
+                var statement = connection.createStatement();
+                var columns = statement.executeQuery("PRAGMA table_info(files)")) {
+            boolean found = false;
+            while (columns.next()) {
+                if ("import_operation_id".equals(columns.getString("name"))) found = true;
+            }
+            assertThat(found).isTrue();
+        }
     }
 
     @Test
