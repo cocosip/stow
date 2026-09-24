@@ -188,24 +188,23 @@ Maven:
 </dependency>
 ```
 
-Minimal `application.yml`:
+Complete `application.yml` configuration:
 
-```yaml
-stow:
-  paths:
-    metadata-directory: ./data/metadata
-    quota-directory: ./data/quota
-    queue-directory: ./data/queue
-    watcher-directory: ./data/watchers
-  tenant:
-    auto-create-tenants: true
-  volumes:
-    - id: primary
-      mount-path: ./data/volume
-      sharding-depth: 2
-      buffer-size: 65536
-      force-flush-after-write: true
-```
+The runnable sample contains a complete, copyable configuration in
+[`samples/stow-sample-spring-boot/src/main/resources/application.yml`](samples/stow-sample-spring-boot/src/main/resources/application.yml).
+It explicitly sets every top-level `stow.*` property, including persistence, SQLite,
+retry, journal, projection, recovery, cleanup, statistics, Actuator, metrics,
+volumes, and a complete single-tenant watcher for `sample-data/inbox`. The
+sample uses module-local `sample-data/` directories so it can be run without
+any external services. Files placed in the inbox are imported for tenant
+`sample` and retained after import (`post-import-action: KEEP`).
+
+The `duration` values use Spring Boot's duration syntax (`30s`, `5m`, `1h`),
+and byte/count values are plain integers. A volume requires `id`, `mount-path`,
+`sharding-depth` (`0` to `3`), and a positive `buffer-size`. A watcher requires
+`watcher-id`, `tenant-id` for `SINGLE_TENANT`, and `watch-path`; `0` for
+`max-file-size` means unlimited. The complete property/default table is in the
+[API and configuration contract](docs/stow-api-contract.md#10-configuration-and-defaults).
 
 Inject `StowRuntime`, `StoragePool`, or `TenantManager` into any application
 service. The injected services are backed by the same runtime and use the same

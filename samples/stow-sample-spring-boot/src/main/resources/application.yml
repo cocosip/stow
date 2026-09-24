@@ -1,3 +1,5 @@
+# Complete Spring Boot binding for the sample. The values below make every
+# top-level stow.* option explicit so this file can be copied as a starting point.
 stow:
   paths:
     metadata-directory: ./sample-data/metadata
@@ -6,9 +8,104 @@ stow:
     watcher-directory: ./sample-data/watchers
   tenant:
     auto-create-tenants: true
+    default-quota: 0
+    preconfigured-tenants:
+      - sample
+  metadata:
+    background-persistence: true
+    max-queue-size: 100000
+    drain-batch-size: 2000
+    soft-merge-threshold-percent: 90
+    startup-load-batch-size: 2000
+    shutdown-drain-timeout: 30s
+    persistence-interval: 2s
+  storage:
+    completion-guard-stripes: 256
+    empty-queue-reclaim-batch-size: 32
+    background-reclaim-batch-size: 8
+    reclaim-cooldown: 30s
+    background-reclaim-enabled: true
+  sqlite:
+    journal-mode: WAL
+    synchronous-mode: NORMAL
+    cache-size-kb: -4000
+    busy-timeout: 5s
+    checkpoint-after-batch: false
+  retry:
+    max-retry-count: 3
+    initial-delay: 5s
+    exponential-backoff: true
+    max-delay: 5m
+  journal:
+    enabled: true
+    projection-enabled: true
+    format: BINARY_V1
+    ack-mode: DURABLE
+    state-flush-debounce: 1s
+    linger: 1ms
+    max-batch-records: 16
+    max-batch-bytes: 262144
+    writer-idle-timeout: 30s
+    async-queue-capacity-per-tenant: 8192
+    balanced-flush-window: 5ms
+  projection:
+    max-records-per-tenant-cycle: 64
+    max-tenants-per-cycle: 8
+    busy-cycle-delay: 500ms
+    idle-cycle-delay: 5s
+    cycle-time-budget: 2s
+  snapshot:
+    enabled: true
+    interval: 15m
+    minimum-progress-bytes: 1048576
+  compaction:
+    enabled: true
+    minimum-processed-bytes: 4194304
+  cleanup:
+    enabled: true
+    interval: 1h
+    initial-delay: 1m
+    processing-timeout: 30m
+    completed-retention: 0s
+    failed-retention: 3d
+    permanently-failed-disposition: MOVE_TO_DEAD_LETTER
+    batch-size-per-tenant: 500
+  orphan-recovery:
+    enabled: false
+    run-on-startup: false
+    interval: 6h
+  statistics:
+    enabled: false
+    window-size: 5m
+    retention: 1h
+    max-series: 16384
+  actuator:
+    enabled: true
+  metrics:
+    enabled: true
   volumes:
     - id: primary
       mount-path: ./sample-data/volume
       sharding-depth: 2
       buffer-size: 65536
       force-flush-after-write: true
+  watchers:
+    - watcher-id: sample-inbox
+      tenant-id: sample
+      tenant-mode: SINGLE_TENANT
+      auto-create-tenant-directories: false
+      watch-path: ./sample-data/inbox
+      enabled: true
+      recursive: false
+      globs:
+        - '*'
+      post-import-action: KEEP
+      move-directory: null
+      poll-interval: 5s
+      max-file-size: 0
+      minimum-file-age: 0s
+      stability-check-interval: 100ms
+      stability-check-count: 2
+      concurrent-imports: 1
+      history-retention: 7d
+      history-flush-interval: 1s

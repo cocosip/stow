@@ -423,7 +423,11 @@ production configuration has no legacy non-journal mode.
 ## 11. Spring Boot Mapping And Dependency Injection
 
 The starter uses the `stow.*` prefix and maps kebab-case properties to the
-same core configuration:
+same core configuration. The runnable sample contains a complete configuration
+with every property explicitly set in
+[`samples/stow-sample-spring-boot/src/main/resources/application.yml`](../samples/stow-sample-spring-boot/src/main/resources/application.yml).
+The following excerpt shows the shape; see the sample file for the complete
+copyable configuration and the table above for defaults and validation rules:
 
 ```yaml
 stow:
