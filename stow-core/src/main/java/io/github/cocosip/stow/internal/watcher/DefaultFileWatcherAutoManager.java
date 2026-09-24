@@ -118,7 +118,11 @@ public final class DefaultFileWatcherAutoManager implements FileWatcherAutoManag
                 1,
                 1,
                 Duration.ofDays(30),
-                Duration.ofSeconds(5));
+                Duration.ofSeconds(5),
+                root.sourceCleanupFailureDirectory(),
+                5,
+                Duration.ofSeconds(5),
+                Duration.ofMinutes(5));
     }
 
     private static String watcherId(Path root, String tenantId) {

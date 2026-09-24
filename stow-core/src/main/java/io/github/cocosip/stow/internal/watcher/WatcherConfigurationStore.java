@@ -26,6 +26,8 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class WatcherConfigurationStore {
 
     private static final int SCHEMA_VERSION = 1;
+    private static final int CONFIGURATION_SCHEMA_VERSION = 2;
+    private static final int ROOT_SCHEMA_VERSION = 2;
     private static final WatcherOptions DEFAULT_OPTIONS =
             new WatcherOptions(true, 1, Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ofDays(30));
 
@@ -258,11 +260,15 @@ public final class WatcherConfigurationStore {
             int stabilityCheckCount,
             int concurrentImports,
             long historyRetentionMillis,
-            long historyFlushIntervalMillis) {
+            long historyFlushIntervalMillis,
+            String sourceCleanupFailureDirectory,
+            Integer maxPostImportActionAttempts,
+            Long postImportRetryInitialDelayMillis,
+            Long postImportRetryMaxDelayMillis) {
 
         static ConfigurationDocument from(WatcherConfiguration model) {
             return new ConfigurationDocument(
-                    SCHEMA_VERSION,
+                    CONFIGURATION_SCHEMA_VERSION,
                     model.watcherId(),
                     model.tenantId(),
                     model.tenantMode().name(),
@@ -280,11 +286,17 @@ public final class WatcherConfigurationStore {
                     model.stabilityCheckCount(),
                     model.concurrentImports(),
                     model.historyRetention().toMillis(),
-                    model.historyFlushInterval().toMillis());
+                    model.historyFlushInterval().toMillis(),
+                    model.sourceCleanupFailureDirectory() == null
+                            ? null
+                            : model.sourceCleanupFailureDirectory().toString(),
+                    model.maxPostImportActionAttempts(),
+                    model.postImportRetryInitialDelay().toMillis(),
+                    model.postImportRetryMaxDelay().toMillis());
         }
 
         WatcherConfiguration toModel() {
-            if (schemaVersion != SCHEMA_VERSION)
+            if (schemaVersion != 1 && schemaVersion != CONFIGURATION_SCHEMA_VERSION)
                 throw new IllegalArgumentException("Unsupported watcher schema version");
             return new WatcherConfiguration(
                     watcherId,
@@ -304,7 +316,14 @@ public final class WatcherConfigurationStore {
                     stabilityCheckCount,
                     concurrentImports,
                     Duration.ofMillis(historyRetentionMillis),
-                    Duration.ofMillis(historyFlushIntervalMillis));
+                    Duration.ofMillis(historyFlushIntervalMillis),
+                    schemaVersion == 1
+                            ? Path.of("stow-source-failed")
+                            : sourceCleanupFailureDirectory == null ? null : Path.of(sourceCleanupFailureDirectory),
+                    maxPostImportActionAttempts == null ? 5 : maxPostImportActionAttempts,
+                    Duration.ofMillis(
+                            postImportRetryInitialDelayMillis == null ? 5_000 : postImportRetryInitialDelayMillis),
+                    Duration.ofMillis(postImportRetryMaxDelayMillis == null ? 300_000 : postImportRetryMaxDelayMillis));
         }
     }
 
@@ -346,22 +365,26 @@ public final class WatcherConfigurationStore {
             boolean recursive,
             List<String> globs,
             String postImportAction,
-            String moveDirectory) {
+            String moveDirectory,
+            String sourceCleanupFailureDirectory) {
 
         static RootDocument from(WatcherRootConfiguration model) {
             return new RootDocument(
-                    SCHEMA_VERSION,
+                    ROOT_SCHEMA_VERSION,
                     model.rootPath().toString(),
                     model.enabled(),
                     model.autoCreateTenantDirectories(),
                     model.recursive(),
                     model.globs(),
                     model.postImportAction().name(),
-                    model.moveDirectory() == null ? null : model.moveDirectory().toString());
+                    model.moveDirectory() == null ? null : model.moveDirectory().toString(),
+                    model.sourceCleanupFailureDirectory() == null
+                            ? null
+                            : model.sourceCleanupFailureDirectory().toString());
         }
 
         WatcherRootConfiguration toModel() {
-            if (schemaVersion != SCHEMA_VERSION)
+            if (schemaVersion != 1 && schemaVersion != ROOT_SCHEMA_VERSION)
                 throw new IllegalArgumentException("Unsupported watcher root schema version");
             return new WatcherRootConfiguration(
                     Path.of(rootPath),
@@ -370,7 +393,10 @@ public final class WatcherConfigurationStore {
                     recursive,
                     globs,
                     PostImportAction.valueOf(postImportAction),
-                    moveDirectory == null ? null : Path.of(moveDirectory));
+                    moveDirectory == null ? null : Path.of(moveDirectory),
+                    schemaVersion == 1
+                            ? Path.of("stow-source-failed")
+                            : sourceCleanupFailureDirectory == null ? null : Path.of(sourceCleanupFailureDirectory));
         }
     }
 

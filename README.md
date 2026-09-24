@@ -170,6 +170,13 @@ for `read`, metadata lookup, location lookup, and status lookup. Queue workers
 call `claimNext` or `claimBatch`, then pass the exact `ProcessingLease` to
 `complete` or `fail`; a stale or mismatched lease is rejected.
 
+Watcher source cleanup is durable and asynchronous. It is active only when
+`sourceCleanup.enabled`, the global watcher option, and at least one watcher
+configuration are all enabled. If any condition is false, Stow does not open
+the source-cleanup database, reclaim reservations, prune records, or run
+`VACUUM`. A bounded cleanup queue defers new imports when full instead of
+importing files whose DELETE or MOVE action cannot be recovered.
+
 ## Spring Boot integration
 
 Add the starter to a Spring Boot application. It brings in `stow-core`, binds
@@ -199,6 +206,11 @@ stow:
     watcher-directory: ./data/watchers
   tenant:
     auto-create-tenants: true
+  source-cleanup:
+    enabled: true
+    database-path: ./data/watchers/source-cleanup.db
+    max-active-jobs: 10000
+    max-concurrent-actions: 2
   volumes:
     - id: primary
       mount-path: ./data/volume

@@ -98,6 +98,18 @@ class StowConfigurationTest {
         assertThat(configuration.statistics().retention()).isEqualTo(Duration.ofHours(1));
         assertThat(configuration.statistics().maxSeries()).isEqualTo(16_384);
 
+        assertThat(configuration.sourceCleanup().enabled()).isTrue();
+        assertThat(configuration.sourceCleanup().databasePath())
+                .isEqualTo(workingDirectory.resolve("stow-watchers").resolve("source-cleanup.db"));
+        assertThat(configuration.sourceCleanup().pollInterval()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(configuration.sourceCleanup().maxConcurrentActions()).isEqualTo(2);
+        assertThat(configuration.sourceCleanup().maxActiveJobs()).isEqualTo(10_000);
+        assertThat(configuration.sourceCleanup().terminalRetention()).isEqualTo(Duration.ofDays(1));
+        assertThat(configuration.sourceCleanup().importReservationTimeout()).isEqualTo(Duration.ofMinutes(10));
+        assertThat(configuration.sourceCleanup().databaseOptimizationEnabled()).isTrue();
+        assertThat(configuration.sourceCleanup().databaseOptimizationInterval()).isEqualTo(Duration.ofDays(1));
+        assertThat(configuration.sourceCleanup().terminalPruneBatchSize()).isEqualTo(5_000);
+
         assertThat(configuration.volumes()).isEmpty();
         assertThat(configuration.watchers()).isEmpty();
     }
@@ -118,6 +130,8 @@ class StowConfigurationTest {
         StowConfiguration configuration = builder.build();
 
         assertThat(configuration.paths().metadataDirectory()).isAbsolute().isNormalized();
+        assertThat(configuration.sourceCleanup().databasePath())
+                .isEqualTo(configuration.paths().watcherDirectory().resolve("source-cleanup.db"));
         assertThat(configuration.volumes()).hasSize(1).isUnmodifiable();
         assertThat(configuration.volumes().getFirst().mountPath()).isAbsolute().isNormalized();
     }
@@ -180,6 +194,19 @@ class StowConfigurationTest {
                 invalid("negative failed retention", builder -> builder.failedRetention(Duration.ofMillis(-1))),
                 invalid("zero cleanup batch", builder -> builder.cleanupBatchSizePerTenant(0)),
                 invalid("zero orphan interval", builder -> builder.orphanRecoveryInterval(Duration.ZERO)),
+                invalid("zero source cleanup poll", builder -> builder.sourceCleanupPollInterval(Duration.ZERO)),
+                invalid("zero source cleanup concurrency", builder -> builder.sourceCleanupMaxConcurrentActions(0)),
+                invalid("zero source cleanup capacity", builder -> builder.sourceCleanupMaxActiveJobs(0)),
+                invalid(
+                        "zero source cleanup retention",
+                        builder -> builder.sourceCleanupTerminalRetention(Duration.ZERO)),
+                invalid(
+                        "zero source cleanup reservation timeout",
+                        builder -> builder.sourceCleanupImportReservationTimeout(Duration.ZERO)),
+                invalid(
+                        "zero source cleanup optimization interval",
+                        builder -> builder.sourceCleanupDatabaseOptimizationInterval(Duration.ZERO)),
+                invalid("zero source cleanup prune batch", builder -> builder.sourceCleanupTerminalPruneBatchSize(0)),
                 invalid("zero statistics window", builder -> builder.statisticsWindowSize(Duration.ZERO)),
                 invalid("retention below window", builder -> builder.statisticsRetention(Duration.ofMinutes(1))),
                 invalid("zero max series", builder -> builder.statisticsMaxSeries(0)));

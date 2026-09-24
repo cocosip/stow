@@ -6,6 +6,12 @@ stow:
     watcher-directory: ./sample-data/watchers
   tenant:
     auto-create-tenants: true
+  source-cleanup:
+    enabled: true
+    database-path: ./sample-data/watchers/source-cleanup.db
+    poll-interval: 5s
+    max-concurrent-actions: 2
+    max-active-jobs: 10000
   volumes:
     - id: primary
       mount-path: ./sample-data/volume

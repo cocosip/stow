@@ -1,9 +1,12 @@
 package io.github.cocosip.stow.internal.watcher;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.api.FileWatcherManager;
 import io.github.cocosip.stow.api.FileWatcherOptionsManager;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
+import io.github.cocosip.stow.config.SourceCleanupConfiguration;
+import io.github.cocosip.stow.exception.StowInterruptedException;
 import io.github.cocosip.stow.internal.statistics.NoopStatisticsRecorder;
 import io.github.cocosip.stow.internal.statistics.StatisticsRecorder;
 import io.github.cocosip.stow.model.WatcherConfiguration;
@@ -11,13 +14,18 @@ import io.github.cocosip.stow.model.WatcherOptions;
 import io.github.cocosip.stow.model.WatcherScanResult;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -33,8 +41,18 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
     private final WatcherScanner scanner;
     private final DefaultOptionsManager options;
     private final Consumer<WatcherScanResult> scanObserver;
+    private final Clock clock;
+    private final ExecutorService scanExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ConcurrentHashMap<String, Instant> nextDueByWatcherId = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CompletableFuture<WatcherScanResult>> activeScans =
+            new ConcurrentHashMap<>();
+    private final Object admissionLock = new Object();
     private final AtomicBoolean running = new AtomicBoolean();
+    private int admittedScans;
+    private boolean closed;
     private ScheduledExecutorService scheduler;
+    private ScheduledFuture<?> pollFuture;
+    private long pollGeneration;
 
     public DefaultFileWatcherManager(
             Path watcherDirectory, StoragePool storagePool, TenantManager tenants, Clock clock) {
@@ -57,16 +75,44 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
             Clock clock,
             StatisticsRecorder statistics,
             Consumer<WatcherScanResult> scanObserver) {
+        this(watcherDirectory, storagePool, tenants, clock, statistics, scanObserver, null, null);
+    }
+
+    public DefaultFileWatcherManager(
+            Path watcherDirectory,
+            StoragePool storagePool,
+            TenantManager tenants,
+            Clock clock,
+            StatisticsRecorder statistics,
+            Consumer<WatcherScanResult> scanObserver,
+            SourceCleanupConfiguration cleanupConfiguration,
+            SourceCleanupStore cleanupStore) {
+        this.clock = Objects.requireNonNull(clock, "clock");
         store = new WatcherConfigurationStore(watcherDirectory);
-        ImportedFileHistory history = new ImportedFileHistory(watcherDirectory.resolve("history"), clock);
-        scanner = new WatcherScanner(storagePool, tenants, history, clock, statistics);
         options = new DefaultOptionsManager(store);
+        ImportedFileHistory history = new ImportedFileHistory(watcherDirectory.resolve("history"), clock);
+        scanner = cleanupStore == null
+                ? new WatcherScanner(storagePool, tenants, history, clock, statistics)
+                : new WatcherScanner(
+                        storagePool,
+                        tenants,
+                        history,
+                        clock,
+                        statistics,
+                        Objects.requireNonNull(cleanupConfiguration, "cleanupConfiguration"),
+                        cleanupStore,
+                        new SourceCleanupGate(cleanupConfiguration, options, this));
         this.scanObserver = Objects.requireNonNull(scanObserver, "scanObserver");
     }
 
     public DefaultFileWatcherManager(WatcherConfigurationStore store, WatcherScanner scanner) {
+        this(store, scanner, Clock.systemUTC());
+    }
+
+    DefaultFileWatcherManager(WatcherConfigurationStore store, WatcherScanner scanner, Clock clock) {
         this.store = Objects.requireNonNull(store, "store");
         this.scanner = Objects.requireNonNull(scanner, "scanner");
+        this.clock = Objects.requireNonNull(clock, "clock");
         options = new DefaultOptionsManager(store);
         scanObserver = ignored -> {};
     }
@@ -77,7 +123,10 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
         if (store.find(configuration.watcherId()).isPresent()) {
             throw new IllegalArgumentException("Watcher already exists: " + configuration.watcherId());
         }
-        return store.save(configuration);
+        WatcherConfiguration saved = store.save(configuration);
+        nextDueByWatcherId.remove(configuration.watcherId());
+        rescheduleNow();
+        return saved;
     }
 
     @Override
@@ -86,13 +135,18 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
         if (store.find(configuration.watcherId()).isEmpty()) {
             throw new IllegalArgumentException("Watcher does not exist: " + configuration.watcherId());
         }
-        return store.save(configuration);
+        WatcherConfiguration saved = store.save(configuration);
+        nextDueByWatcherId.remove(configuration.watcherId());
+        rescheduleNow();
+        return saved;
     }
 
     @Override
     public void remove(String watcherId) {
         requireExisting(watcherId);
         store.remove(watcherId);
+        nextDueByWatcherId.remove(watcherId);
+        rescheduleNow();
     }
 
     @Override
@@ -124,9 +178,7 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
 
     @Override
     public WatcherScanResult scanNow(String watcherId) {
-        WatcherScanResult result = scanner.scan(requireExisting(watcherId));
-        scanObserver.accept(result);
-        return result;
+        return executeScan(requireExisting(watcherId), false);
     }
 
     public FileWatcherOptionsManager options() {
@@ -135,21 +187,38 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
 
     /** Starts the polling loop; lifecycle owners may call this after runtime recovery is complete. */
     public synchronized void start() {
+        synchronized (admissionLock) {
+            if (closed) throw new IllegalStateException("File watcher manager is closed");
+        }
         if (!running.compareAndSet(false, true)) return;
         scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform()
                 .daemon(true)
                 .name("stow-watcher-scheduler-", 0)
                 .factory());
-        long interval = Math.max(1, options.get().scanInterval().toMillis());
-        scheduler.scheduleWithFixedDelay(this::poll, 0, interval, TimeUnit.MILLISECONDS);
+        schedulePoll(Duration.ZERO);
     }
 
-    public synchronized void stop() {
-        if (!running.compareAndSet(true, false)) return;
-        if (scheduler != null) {
-            scheduler.shutdownNow();
+    @SuppressFBWarnings(
+            value = "NN_NAKED_NOTIFY",
+            justification = "The notification follows the running-state transition stored in AtomicBoolean.")
+    public void stop() {
+        ScheduledExecutorService stoppedScheduler;
+        synchronized (this) {
+            running.set(false);
+            pollGeneration++;
+            if (pollFuture != null) {
+                pollFuture.cancel(false);
+                pollFuture = null;
+            }
+            stoppedScheduler = scheduler;
             scheduler = null;
+            if (stoppedScheduler != null) stoppedScheduler.shutdownNow();
         }
+        synchronized (admissionLock) {
+            admissionLock.notifyAll();
+        }
+        awaitActiveScans();
+        awaitScheduler(stoppedScheduler);
     }
 
     WatcherConfigurationStore store() {
@@ -158,44 +227,181 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
 
     @Override
     public void close() {
+        synchronized (admissionLock) {
+            closed = true;
+            admissionLock.notifyAll();
+        }
         stop();
-    }
-
-    private void poll() {
+        scanExecutor.shutdown();
         try {
-            pollOnce();
-        } catch (RuntimeException exception) {
-            // scheduleWithFixedDelay cancels all future executions after an uncaught exception;
-            // store-level failures (corrupt state files) must not permanently kill polling
-            LOG.warn("Watcher polling round failed; continuing with next round", exception);
+            while (!scanExecutor.awaitTermination(1, TimeUnit.DAYS)) {
+                // Continue waiting without interrupting admitted scans.
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new StowInterruptedException("Interrupted while stopping file watcher scans", exception);
         }
     }
 
-    private void pollOnce() {
-        if (!running.get() || !options.get().enabled()) return;
+    private void poll(long generation) {
+        try {
+            if (running.get()) pollOnce(true);
+        } catch (RuntimeException exception) {
+            LOG.warn("Watcher polling round failed; continuing with next round", exception);
+        } finally {
+            synchronized (this) {
+                if (running.get() && generation == pollGeneration) schedulePoll(nextPollDelay());
+            }
+        }
+    }
+
+    private synchronized void schedulePoll(Duration delay) {
+        if (!running.get() || scheduler == null) return;
+        long generation = ++pollGeneration;
+        pollFuture = scheduler.schedule(() -> poll(generation), Math.max(0, delay.toMillis()), TimeUnit.MILLISECONDS);
+    }
+
+    private synchronized void rescheduleNow() {
+        if (!running.get() || scheduler == null) return;
+        pollGeneration++;
+        if (pollFuture != null) pollFuture.cancel(false);
+        schedulePoll(Duration.ZERO);
+    }
+
+    private Duration nextPollDelay() {
+        WatcherOptions current = options.get();
+        Duration delay = normalized(current.scanInterval());
+        if (!current.enabled()) return delay;
+        Instant now = clock.instant();
+        for (WatcherConfiguration configuration : list()) {
+            if (!configuration.enabled()) continue;
+            Duration candidate;
+            Instant due = nextDueByWatcherId.get(configuration.watcherId());
+            if (activeScans.containsKey(configuration.watcherId()) || Instant.MAX.equals(due)) {
+                candidate = normalized(configuration.pollInterval());
+            } else if (due == null || !due.isAfter(now)) {
+                candidate = Duration.ofMillis(1);
+            } else {
+                candidate = Duration.between(now, due);
+            }
+            if (candidate.compareTo(delay) < 0) delay = candidate;
+        }
+        return normalized(delay);
+    }
+
+    void pollOnce() {
+        pollOnce(false);
+    }
+
+    private void pollOnce(boolean background) {
+        if (!options.get().enabled()) return;
         List<WatcherConfiguration> enabled =
                 list().stream().filter(WatcherConfiguration::enabled).toList();
         if (enabled.isEmpty()) return;
-        WatcherOptions current = options.get();
-        Semaphore permits = new Semaphore(current.maxParallelScans());
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (WatcherConfiguration configuration : enabled) {
-                executor.submit(() -> {
-                    boolean acquired = false;
-                    try {
-                        permits.acquire();
-                        acquired = true;
-                        scanObserver.accept(scanner.scan(configuration));
-                    } catch (InterruptedException exception) {
-                        Thread.currentThread().interrupt();
-                    } catch (RuntimeException ignored) {
-                        // A single polling failure is isolated to this round.
-                    } finally {
-                        if (acquired) permits.release();
-                    }
-                });
+        Instant now = clock.instant();
+        for (WatcherConfiguration configuration : enabled) {
+            if (background && !running.get()) return;
+            if (activeScans.containsKey(configuration.watcherId())) continue;
+            Instant due = nextDueByWatcherId.get(configuration.watcherId());
+            if (due != null && due.isAfter(now)) continue;
+            nextDueByWatcherId.put(configuration.watcherId(), Instant.MAX);
+            scanExecutor.submit(() -> {
+                try {
+                    executeScan(configuration, background);
+                } catch (RuntimeException ignored) {
+                    // A single watcher failure is isolated from the polling coordinator.
+                }
+            });
+        }
+    }
+
+    private WatcherScanResult executeScan(WatcherConfiguration configuration, boolean background) {
+        String watcherId = configuration.watcherId();
+        CompletableFuture<WatcherScanResult> current = new CompletableFuture<>();
+        CompletableFuture<WatcherScanResult> existing = activeScans.putIfAbsent(watcherId, current);
+        if (existing != null) return join(existing);
+
+        boolean admitted = false;
+        try {
+            admitted = acquireScan(background);
+            if (!admitted) throw new IllegalStateException("File watcher scan admission is closed");
+            WatcherScanResult result = scanner.scan(configuration);
+            scanObserver.accept(result);
+            current.complete(result);
+            return result;
+        } catch (RuntimeException | Error failure) {
+            current.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            if (admitted) releaseScan();
+            activeScans.remove(watcherId, current);
+            WatcherConfiguration latest = store.find(watcherId).orElse(configuration);
+            nextDueByWatcherId.put(watcherId, clock.instant().plus(normalized(latest.pollInterval())));
+        }
+    }
+
+    private boolean acquireScan(boolean background) {
+        synchronized (admissionLock) {
+            while (!closed
+                    && (!background || running.get())
+                    && admittedScans >= options.get().maxParallelScans()) {
+                try {
+                    admissionLock.wait();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new StowInterruptedException("Interrupted while waiting for a watcher scan slot", exception);
+                }
+            }
+            if (closed || (background && !running.get())) return false;
+            admittedScans++;
+            return true;
+        }
+    }
+
+    private void releaseScan() {
+        synchronized (admissionLock) {
+            admittedScans--;
+            admissionLock.notifyAll();
+        }
+    }
+
+    private void awaitActiveScans() {
+        synchronized (admissionLock) {
+            while (admittedScans > 0) {
+                try {
+                    admissionLock.wait();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new StowInterruptedException("Interrupted while stopping file watcher scans", exception);
+                }
             }
         }
+    }
+
+    private static void awaitScheduler(ScheduledExecutorService stoppedScheduler) {
+        if (stoppedScheduler == null) return;
+        try {
+            while (!stoppedScheduler.awaitTermination(1, TimeUnit.DAYS)) {
+                // Continue waiting for an in-progress polling round.
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new StowInterruptedException("Interrupted while stopping file watcher polling", exception);
+        }
+    }
+
+    private static WatcherScanResult join(CompletableFuture<WatcherScanResult> scan) {
+        try {
+            return scan.join();
+        } catch (CompletionException exception) {
+            if (exception.getCause() instanceof RuntimeException runtime) throw runtime;
+            if (exception.getCause() instanceof Error error) throw error;
+            throw exception;
+        }
+    }
+
+    private static Duration normalized(Duration interval) {
+        return interval.isZero() ? Duration.ofMillis(1) : interval;
     }
 
     private WatcherConfiguration requireExisting(String watcherId) {
@@ -222,10 +428,14 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
                 configuration.stabilityCheckCount(),
                 configuration.concurrentImports(),
                 configuration.historyRetention(),
-                configuration.historyFlushInterval());
+                configuration.historyFlushInterval(),
+                configuration.sourceCleanupFailureDirectory(),
+                configuration.maxPostImportActionAttempts(),
+                configuration.postImportRetryInitialDelay(),
+                configuration.postImportRetryMaxDelay());
     }
 
-    private static final class DefaultOptionsManager implements FileWatcherOptionsManager {
+    private final class DefaultOptionsManager implements FileWatcherOptionsManager {
         private final WatcherConfigurationStore store;
 
         private DefaultOptionsManager(WatcherConfigurationStore store) {
@@ -238,8 +448,15 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
         }
 
         @Override
+        @SuppressFBWarnings(
+                value = "NN_NAKED_NOTIFY",
+                justification = "The notification follows a durable watcher-options update outside this monitor.")
         public void update(WatcherOptions options) {
             store.writeOptions(options);
+            synchronized (admissionLock) {
+                admissionLock.notifyAll();
+            }
+            rescheduleNow();
         }
 
         @Override

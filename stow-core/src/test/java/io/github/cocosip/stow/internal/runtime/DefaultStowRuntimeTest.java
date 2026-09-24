@@ -296,6 +296,7 @@ class DefaultStowRuntimeTest {
         StowConfiguration configuration = configurationWithVolume(root)
                 .watchers(List.of(watcher))
                 .preconfiguredTenants(List.of("tenant-a"))
+                .sourceCleanupPollInterval(Duration.ofMillis(10))
                 .statisticsEnabled(true)
                 .build();
 
@@ -308,6 +309,59 @@ class DefaultStowRuntimeTest {
                             Instant.now().minusSeconds(60), Instant.now().plusSeconds(60), null, null, null, null));
             assertThat(statistics.watcherImportedCount()).isEqualTo(1);
             assertThat(statistics.watcherImportedBytes()).isEqualTo(3);
+        }
+    }
+
+    @Test
+    void doesNotCreateSourceCleanupDatabaseWithoutAnEnabledWatcher() throws Exception {
+        Path root = temporaryDirectory.resolve("source-cleanup-gate-closed");
+        Path database = root.resolve("watchers/source-cleanup.db");
+        StowConfiguration configuration = configurationWithVolume(root)
+                .sourceCleanupDatabasePath(database)
+                .sourceCleanupPollInterval(Duration.ofMillis(10))
+                .build();
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            Thread.sleep(100);
+            assertThat(database).doesNotExist();
+        }
+    }
+
+    @Test
+    void startsSourceCleanupWorkerWhenAllGateConditionsAreEnabled() throws Exception {
+        Path root = temporaryDirectory.resolve("source-cleanup-gate-open");
+        Path inbox = root.resolve("inbox");
+        Path database = root.resolve("watchers/source-cleanup.db");
+        Files.createDirectories(inbox);
+        WatcherConfiguration watcher = new WatcherConfiguration(
+                "watcher-a",
+                "tenant-a",
+                WatcherTenantMode.SINGLE_TENANT,
+                false,
+                inbox,
+                true,
+                false,
+                List.of("*.dcm"),
+                PostImportAction.KEEP,
+                null,
+                Duration.ofSeconds(1),
+                0,
+                Duration.ZERO,
+                Duration.ZERO,
+                1,
+                1,
+                Duration.ofDays(1),
+                Duration.ZERO);
+        StowConfiguration configuration = configurationWithVolume(root)
+                .watchers(List.of(watcher))
+                .preconfiguredTenants(List.of("tenant-a"))
+                .sourceCleanupDatabasePath(database)
+                .sourceCleanupPollInterval(Duration.ofMillis(10))
+                .build();
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            await().atMost(Duration.ofSeconds(2))
+                    .untilAsserted(() -> assertThat(database).exists());
         }
     }
 

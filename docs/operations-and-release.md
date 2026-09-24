@@ -71,6 +71,26 @@ rules but have no corresponding `ACCEPTED` event or metadata row. Files that
 cannot be identified safely are not deleted. Record every cleanup error and
 retry it during the next maintenance cycle.
 
+## Watcher Source Cleanup
+
+Watcher DELETE and MOVE actions use `{watcherDirectory}/source-cleanup.db` so
+an imported source is not forgotten when the process exits between storage and
+the post-import action. The worker is intentionally dormant unless source
+cleanup, the global watcher option, and at least one watcher configuration are
+all enabled. When dormant it does not create or open the database and does not
+run reservation recovery, pruning, claims, or optimization.
+
+When `maxActiveJobs` is reached, scans report a deferred import and leave the
+source untouched. Investigate terminal failures and the configured failure
+directory before increasing capacity. Do not delete rows manually: stale
+IMPORTING reservations, terminal retention, and `VACUUM` are bounded worker
+operations. Preserve `source-cleanup.db` with the watcher directory during an
+incident or backup.
+
+Shutdown stops new watcher scans, waits for admitted scans, then stops cleanup
+claims and waits for active source actions before journal, projection, and
+volume resources close.
+
 ## Build And Version Management
 
 The Maven reactor uses one project version and centrally managed dependency and

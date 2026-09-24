@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.cocosip.stow.api.ContentSources;
+import io.github.cocosip.stow.api.IdempotentStoragePool;
 import io.github.cocosip.stow.exception.StoredFileNotFoundException;
 import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
 import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
@@ -31,6 +32,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
 
 class StorageWriteReadTest {
@@ -100,6 +102,55 @@ class StorageWriteReadTest {
         pool.write(tenant, input, WriteOptions.defaults());
 
         assertThat(input.closed).isFalse();
+    }
+
+    @Test
+    void deduplicatesConcurrentWritesByTenantAndOperationId() throws Exception {
+        Path root = Files.createTempDirectory(Path.of("target"), "storage-idempotent-");
+        Clock clock = Clock.fixed(Instant.parse("2026-09-18T00:00:00Z"), ZoneOffset.UTC);
+        TenantContext tenant = tenant("tenant-a", TenantStatus.ENABLED, clock);
+        SqliteQuotaRepository quota = new SqliteQuotaRepository(
+                root.resolve("quota"), SqliteConnectionFactory.defaults(), clock, ignored -> 10);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(root.resolve("metadata"), SqliteConnectionFactory.defaults(), clock);
+        QueueEventJournal journal =
+                new FileQueueEventJournal(root.resolve("journal"), journalConfiguration(), new BinaryV1JournalCodec());
+        QueueProjectionService projection = new QueueProjectionService(
+                journal,
+                new QueueEventReducer(metadata, quota),
+                new ProjectionCursorStore(root.resolve("cursor"), clock),
+                clock,
+                new ActiveFileCache(metadata));
+        TestVolume volume = new TestVolume("volume-a", root.resolve("volume"));
+        IdempotentStoragePool pool =
+                new DefaultStoragePool(tenantManager(tenant), quota, metadata, projection, journal, volume, clock);
+
+        String first;
+        String second;
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var one = executor.submit(() -> pool.writeIdempotently(
+                    tenant, ContentSources.of("hello".getBytes()), WriteOptions.defaults(), "operation-1"));
+            var two = executor.submit(() -> pool.writeIdempotently(
+                    tenant, ContentSources.of("hello".getBytes()), WriteOptions.defaults(), "operation-1"));
+            first = one.get();
+            second = two.get();
+        }
+
+        assertThat(second).isEqualTo(first);
+        assertThat(volume.files).hasSize(1);
+        assertThat(quota.tenantCurrentCount(tenant.tenantId())).isEqualTo(1);
+        assertThat(journal.readBatch(tenant.tenantId(), 0, 10).events())
+                .filteredOn(event -> event.eventType() == io.github.cocosip.stow.model.QueueEventType.ACCEPTED)
+                .singleElement()
+                .extracting(io.github.cocosip.stow.model.QueueEventRecord::importOperationId)
+                .isEqualTo("operation-1");
+        IdempotentStoragePool reopened =
+                new DefaultStoragePool(tenantManager(tenant), quota, metadata, projection, journal, volume, clock);
+        assertThat(reopened.writeIdempotently(
+                        tenant, ContentSources.of("ignored".getBytes()), WriteOptions.defaults(), "operation-1"))
+                .isEqualTo(first);
+        assertThat(volume.files).hasSize(1);
+        journal.close();
     }
 
     private static DefaultStoragePool.TenantLookup tenantManager(TenantContext expected) {

@@ -10,7 +10,10 @@ public record WatcherRootConfiguration(
         boolean recursive,
         List<String> globs,
         PostImportAction postImportAction,
-        Path moveDirectory) {
+        Path moveDirectory,
+        Path sourceCleanupFailureDirectory) {
+
+    private static final Path DEFAULT_FAILURE_DIRECTORY = Path.of("stow-source-failed");
 
     public WatcherRootConfiguration {
         ModelValidation.required("rootPath", rootPath);
@@ -23,5 +26,28 @@ public record WatcherRootConfiguration(
         if (moveDirectory != null) {
             moveDirectory = moveDirectory.toAbsolutePath().normalize();
         }
+        if (sourceCleanupFailureDirectory != null) {
+            sourceCleanupFailureDirectory =
+                    sourceCleanupFailureDirectory.toAbsolutePath().normalize();
+        }
+    }
+
+    public WatcherRootConfiguration(
+            Path rootPath,
+            boolean enabled,
+            boolean autoCreateTenantDirectories,
+            boolean recursive,
+            List<String> globs,
+            PostImportAction postImportAction,
+            Path moveDirectory) {
+        this(
+                rootPath,
+                enabled,
+                autoCreateTenantDirectories,
+                recursive,
+                globs,
+                postImportAction,
+                moveDirectory,
+                DEFAULT_FAILURE_DIRECTORY);
     }
 }

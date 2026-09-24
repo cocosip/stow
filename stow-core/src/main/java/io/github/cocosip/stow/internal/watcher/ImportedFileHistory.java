@@ -67,6 +67,18 @@ public final class ImportedFileHistory {
         }
     }
 
+    public Optional<HistoryEntry> find(String watcherId, SourceFingerprint fingerprint) {
+        Objects.requireNonNull(fingerprint, "fingerprint");
+        lock.lock();
+        try {
+            return readEntries(watcherId).stream()
+                    .filter(entry -> fingerprint.equals(entry.fingerprint()))
+                    .max(Comparator.comparing(HistoryEntry::recordedAt));
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public void recordImported(
             String watcherId, Path source, long size, long modifiedAtMillis, String fileKey, boolean actionCompleted) {
         append(
@@ -77,11 +89,30 @@ public final class ImportedFileHistory {
                         modifiedAtMillis,
                         fileKey,
                         actionCompleted,
-                        clock.instant()));
+                        clock.instant(),
+                        null));
+    }
+
+    public void recordImported(
+            String watcherId, SourceFingerprint fingerprint, String fileKey, boolean actionCompleted) {
+        append(
+                watcherId,
+                new HistoryEntry(
+                        fingerprint.path(),
+                        fingerprint.size(),
+                        fingerprint.lastModifiedMillis(),
+                        fileKey,
+                        actionCompleted,
+                        clock.instant(),
+                        fingerprint));
     }
 
     public void recordActionCompleted(String watcherId, Path source, long size, long modifiedAtMillis, String fileKey) {
         recordImported(watcherId, source, size, modifiedAtMillis, fileKey, true);
+    }
+
+    public void recordActionCompleted(String watcherId, SourceFingerprint fingerprint, String fileKey) {
+        recordImported(watcherId, fingerprint, fileKey, true);
     }
 
     public void prune(String watcherId, Duration retention) {
@@ -247,7 +278,18 @@ public final class ImportedFileHistory {
             long modifiedAtMillis,
             String fileKey,
             boolean actionCompleted,
-            Instant recordedAt) {
+            Instant recordedAt,
+            SourceFingerprint fingerprint) {
+
+        public HistoryEntry(
+                String sourcePath,
+                long size,
+                long modifiedAtMillis,
+                String fileKey,
+                boolean actionCompleted,
+                Instant recordedAt) {
+            this(sourcePath, size, modifiedAtMillis, fileKey, actionCompleted, recordedAt, null);
+        }
 
         public HistoryEntry {
             Objects.requireNonNull(sourcePath, "sourcePath");

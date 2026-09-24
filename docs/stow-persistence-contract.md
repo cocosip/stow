@@ -31,6 +31,7 @@ schema or format version and an explicit migration.
 {watcherDirectory}/
   options.json
   root.json
+  source-cleanup.db
   watchers/{watcherId}.json
   history/{watcherId}.jsonl
 
@@ -138,6 +139,7 @@ CREATE TABLE files (
     original_file_name          TEXT,
     file_extension              TEXT,
     metadata_json               TEXT,
+    import_operation_id         TEXT,
     last_event_sequence         INTEGER NOT NULL,
     row_version                 INTEGER NOT NULL DEFAULT 0
 );
@@ -156,6 +158,9 @@ CREATE INDEX idx_files_status_failed
     ON files(status, last_failed_at_ms, file_key);
 CREATE UNIQUE INDEX idx_files_physical_path
     ON files(physical_path);
+CREATE UNIQUE INDEX idx_files_import_operation
+    ON files(tenant_id, import_operation_id)
+    WHERE import_operation_id IS NOT NULL;
 ```
 
 Each projection batch is one transaction: check `applied_events`, apply the
@@ -335,6 +340,17 @@ Compensation follows the invariant that a physical file must not coexist with
 released quota. A residual file that cannot be deleted is owned by orphan
 recovery.
 
+`IdempotentStoragePool.writeIdempotently` stores the caller's operation ID on
+the `ACCEPTED` event and `files.import_operation_id`. The tenant-scoped partial
+unique index and striped admission return the original file key after retry or
+restart without consuming quota or appending another `ACCEPTED` fact.
+
+Watcher imports first reserve a strong source fingerprint in
+`source-cleanup.db`, then perform the idempotent write, activate the cleanup
+row, and finally record statistics. Capacity rejection happens before the
+storage write. A failure after `ACCEPTED` but before activation is retried with
+the deterministic operation ID.
+
 ## 13. Deletion And Dead-Letter Boundaries
 
 Completion does not delete immediately. The reaper handles only
@@ -393,7 +409,27 @@ unprocessed suffix to a temporary file, force it, atomically replace the log,
 and atomically write state. Any failure retains the original log or a complete
 suffix recoverable from the snapshot.
 
-## 17. Shutdown Invariants
+## 17. Source Cleanup Database
+
+`source-cleanup.db` is opened lazily and contains `source_cleanup_jobs` with a
+unique `(watcher_id, source_path)` key. Each row persists the normalized path,
+versioned size/time/content-sample fingerprint, import operation ID, resulting
+file key, action and target, failure directory, retry policy and count, state,
+due time, timestamps, and claim lease. The due index is ordered by state,
+next-attempt, lease, and update time.
+
+`IMPORTING` reservations older than the configured timeout are removed so a
+later scan can reserve again and reuse the deterministic storage operation ID.
+DELETE and MOVE always recapture the fingerprint; mismatch removes only the
+obsolete job and leaves the replacement source untouched. Successful actions
+and missing sources remove the row. Exhausted failures move matching content to
+`<failureDirectory>/<watcherId>/`; a failed quarantine becomes terminal.
+
+The database, reservation recovery, terminal pruning, claims, and `VACUUM` are
+all gated by source-cleanup enabled, global watcher enabled, and at least one
+enabled watcher configuration. No gate means no database creation or access.
+
+## 18. Shutdown Invariants
 
 Shutdown first blocks new writes and claims, then stops watchers and cleanup,
 drains journal writers and metadata queues, flushes state/cursor, checkpoints

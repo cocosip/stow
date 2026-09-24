@@ -189,6 +189,7 @@ public final class PermanentFailureReaper {
                 null,
                 row.lastError(),
                 row.originalFileName(),
-                row.fileExtension());
+                row.fileExtension(),
+                row.importOperationId());
     }
 }

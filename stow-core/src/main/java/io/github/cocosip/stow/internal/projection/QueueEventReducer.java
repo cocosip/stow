@@ -98,8 +98,8 @@ public final class QueueEventReducer {
                 """
                 INSERT INTO files(file_key, tenant_id, volume_id, physical_path, logical_directory, file_size,
                     created_at_ms, status, retry_count, lease_id, processing_started_at_ms, original_file_name,
-                    file_extension, last_event_sequence, row_version)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    file_extension, import_operation_id, last_event_sequence, row_version)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """)) {
             s.setString(1, e.fileKey());
             s.setString(2, e.tenantId());
@@ -114,7 +114,8 @@ public final class QueueEventReducer {
             s.setObject(11, null);
             s.setString(12, e.originalFileName());
             s.setString(13, e.fileExtension());
-            s.setLong(14, e.sequenceNumber());
+            s.setString(14, e.importOperationId());
+            s.setLong(15, e.sequenceNumber());
             s.executeUpdate();
         }
     }

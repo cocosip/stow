@@ -100,6 +100,12 @@ public final class ContentSources {
     public static ContentSource of(byte[] bytes);
     public static ContentSource singleUse(InputStream input, OptionalLong length);
 }
+
+public interface IdempotentStoragePool {
+    String writeIdempotently(
+        TenantContext tenant, ContentSource content,
+        WriteOptions options, String operationId);
+}
 ```
 
 The `InputStream` overload makes one volume attempt and does not close the
@@ -280,7 +286,17 @@ public enum PostImportAction { DELETE, MOVE, KEEP }
 multi-tenant mode, automatic tenant-directory creation, path, enabled and
 recursive flags, globs, post-import action and move directory, polling and
 stability settings, size/age limits, import concurrency, and history retention
-and flush settings. Collections are defensively copied.
+and flush settings. It also contains the optional cleanup failure directory,
+maximum post-import attempts, and initial/maximum retry delays. Scan results
+report retried actions, quarantined files, and capacity-deferred imports.
+Collections are defensively copied.
+
+Source cleanup runs only while all three conditions are true:
+`sourceCleanup.enabled`, `WatcherOptions.enabled`, and at least one enabled
+`WatcherConfiguration`. A false condition prevents every cleanup operation,
+including opening the database, releasing stale reservations, pruning terminal
+rows, and optimization. `scanNow` and background polling share the same
+per-watcher non-overlap guarantee.
 
 ## 8. Statistics And Health APIs
 
@@ -401,6 +417,16 @@ during `build()`.
 | cleanup | `failedRetention` | `3d` |
 | cleanup | `permanentlyFailedDisposition` | `MOVE_TO_DEAD_LETTER` |
 | cleanup | `batchSizePerTenant` | `500` |
+| sourceCleanup | `enabled` | `true` |
+| sourceCleanup | `databasePath` | `<watcherDirectory>/source-cleanup.db` |
+| sourceCleanup | `pollInterval` | `5s` |
+| sourceCleanup | `maxConcurrentActions` | `2` |
+| sourceCleanup | `maxActiveJobs` | `10000` |
+| sourceCleanup | `terminalRetention` | `1d` |
+| sourceCleanup | `importReservationTimeout` | `10m` |
+| sourceCleanup | `databaseOptimizationEnabled` | `true` |
+| sourceCleanup | `databaseOptimizationInterval` | `1d` |
+| sourceCleanup | `terminalPruneBatchSize` | `5000` |
 | orphanRecovery | `enabled` | `false` |
 | orphanRecovery | `runOnStartup` | `false` |
 | orphanRecovery | `interval` | `6h` |
@@ -414,7 +440,9 @@ positive buffer size, and default `forceFlushAfterWrite=false`. Watchers are
 empty by default; required fields are `watcher-id`, `tenant-id`, and
 `watch-path`. Their defaults are enabled, non-recursive, `[*]`, `KEEP`, a 5s
 poll interval, zero minimum age, a 100ms stability interval, two stability
-checks, one concurrent import, 7d history retention, and a 1s history flush.
+checks, one concurrent import, 7d history retention, a 1s history flush, five
+post-import attempts, 5s initial retry, 5m maximum retry, and
+`./stow-source-failed` as the cleanup failure directory.
 
 All capacities, counts, durations, and percentages are validated during
 `build()`. The journal cannot be disabled without an explicit test-only switch;

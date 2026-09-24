@@ -23,7 +23,8 @@ public record QueueEventRecord(
         Instant availableAt,
         String errorMessage,
         String originalFileName,
-        String fileExtension) {
+        String fileExtension,
+        String importOperationId) {
 
     public QueueEventRecord {
         if (schemaVersion <= 0) {
@@ -47,5 +48,51 @@ public record QueueEventRecord(
         errorMessage = ModelValidation.errorSummary(errorMessage);
         originalFileName = ModelValidation.fileName(originalFileName);
         fileExtension = ModelValidation.extension(fileExtension);
+        if (importOperationId != null && (importOperationId.isBlank() || importOperationId.length() > 256)) {
+            throw ModelValidation.invalid("importOperationId", "must contain between 1 and 256 characters");
+        }
+    }
+
+    public QueueEventRecord(
+            int schemaVersion,
+            UUID eventId,
+            String tenantId,
+            String fileKey,
+            QueueEventType eventType,
+            Instant occurredAt,
+            long sequenceNumber,
+            String volumeId,
+            Path physicalPath,
+            String logicalDirectory,
+            long fileSize,
+            FileProcessingStatus status,
+            UUID leaseId,
+            Instant processingStartedAt,
+            int retryCount,
+            Instant availableAt,
+            String errorMessage,
+            String originalFileName,
+            String fileExtension) {
+        this(
+                schemaVersion,
+                eventId,
+                tenantId,
+                fileKey,
+                eventType,
+                occurredAt,
+                sequenceNumber,
+                volumeId,
+                physicalPath,
+                logicalDirectory,
+                fileSize,
+                status,
+                leaseId,
+                processingStartedAt,
+                retryCount,
+                availableAt,
+                errorMessage,
+                originalFileName,
+                fileExtension,
+                null);
     }
 }

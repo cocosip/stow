@@ -99,6 +99,7 @@ public final class SequencedJournalAppender {
                 event.availableAt(),
                 event.errorMessage(),
                 event.originalFileName(),
-                event.fileExtension());
+                event.fileExtension(),
+                event.importOperationId());
     }
 }
