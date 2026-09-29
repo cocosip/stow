@@ -36,6 +36,28 @@ public final class JournalStateStore {
     }
 
     public void write(State state) throws IOException {
+        // Windows real-time scanners can hold the replacement target open for a
+        // short while; retry the whole write because each attempt uses a fresh
+        // temporary file and the payload is deterministic.
+        java.nio.file.AccessDeniedException lastFailure = null;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            try {
+                writeOnce(state);
+                return;
+            } catch (java.nio.file.AccessDeniedException exception) {
+                lastFailure = exception;
+                try {
+                    Thread.sleep(10L * (attempt + 1));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while persisting journal state", interrupted);
+                }
+            }
+        }
+        throw lastFailure;
+    }
+
+    private void writeOnce(State state) throws IOException {
         Path parent = path.toAbsolutePath().normalize().getParent();
         if (parent == null) throw new IOException("Journal state path has no parent: " + path);
         Files.createDirectories(parent);

@@ -101,7 +101,9 @@ class RuntimeConcurrencyIT {
             assertThat(completed).hasValue(expected);
             assertThat(claimed).containsExactlyInAnyOrderElementsOf(keys);
             for (String key : keys) {
-                assertThat(runtime.storagePool().status(tenant, key)).isEqualTo(FileProcessingStatus.COMPLETED);
+                // Completion appends PROCESSING_COMPLETED and DELETE_REQUESTED together,
+                // so the projected row converges to the delete-requested state.
+                assertThat(runtime.storagePool().status(tenant, key)).isEqualTo(FileProcessingStatus.DELETE_REQUESTED);
             }
         }
     }

@@ -5,10 +5,12 @@ import io.github.cocosip.stow.api.IdempotentStoragePool;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.config.SourceCleanupConfiguration;
+import io.github.cocosip.stow.exception.TenantDisabledException;
 import io.github.cocosip.stow.internal.statistics.NoopStatisticsRecorder;
 import io.github.cocosip.stow.internal.statistics.StatisticsRecorder;
 import io.github.cocosip.stow.model.MaintenanceError;
 import io.github.cocosip.stow.model.TenantContext;
+import io.github.cocosip.stow.model.TenantStatus;
 import io.github.cocosip.stow.model.WatcherConfiguration;
 import io.github.cocosip.stow.model.WatcherScanResult;
 import io.github.cocosip.stow.model.WatcherTenantMode;
@@ -161,6 +163,10 @@ public final class WatcherScanner {
                         stable.size(), tenantForError(configuration), "post-action", exception);
             }
             return Outcome.importedOutcome(stable.size());
+        } catch (io.github.cocosip.stow.exception.TenantDisabledException exception) {
+            // Disabled tenants are skipped, not failed: importing for them would
+            // violate isolation and their files stay for a later re-enable.
+            return Outcome.skippedOutcome();
         } catch (RuntimeException exception) {
             return Outcome.failedOutcome(tenantForError(configuration), "import", exception);
         }
@@ -209,6 +215,13 @@ public final class WatcherScanner {
             String fileKey = storagePool instanceof IdempotentStoragePool idempotent
                     ? idempotent.writeIdempotently(tenant, content, writeOptions, job.importOperationId())
                     : storagePool.write(tenant, content, writeOptions);
+            if (idempotentWrite() && !Files.exists(source)) {
+                // The idempotent write was served from the operation cache, and the
+                // source is already gone: a concurrent post-import action handled this
+                // file between fingerprinting and the write. This scan re-reserved the
+                // finished job; drop it instead of double-counting the import.
+                return Outcome.skippedOutcome();
+            }
             writeCompleted = true;
             cleanupStore.activate(job.id(), fileKey);
             statistics.recordWatcherImport(configuration.watcherId(), tenant.tenantId(), stable.size());
@@ -218,6 +231,10 @@ public final class WatcherScanner {
                 cleanupStore.remove(job.id());
             }
         }
+    }
+
+    private boolean idempotentWrite() {
+        return storagePool instanceof IdempotentStoragePool;
     }
 
     private StableFile stable(Path source, WatcherConfiguration configuration) {
@@ -248,7 +265,15 @@ public final class WatcherScanner {
             tenantId = relative.getName(0).toString();
         }
         Optional<TenantContext> existing = tenants.find(tenantId);
-        if (existing.isPresent()) return existing.orElseThrow();
+        if (existing.isPresent()) {
+            TenantContext tenant = existing.orElseThrow();
+            // A disabled tenant rejects every operation; importing for it would both
+            // violate the isolation contract and consume its quota.
+            if (tenant.status() != TenantStatus.ENABLED) {
+                throw new TenantDisabledException("Tenant is disabled: " + tenantId);
+            }
+            return tenant;
+        }
         if (!configuration.autoCreateTenantDirectories()) {
             throw new IllegalStateException("Tenant does not exist: " + tenantId);
         }

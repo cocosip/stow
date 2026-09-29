@@ -2,6 +2,9 @@ package io.github.cocosip.stow.exception;
 
 public abstract class StowException extends RuntimeException {
 
+    @java.io.Serial
+    protected static final long serialVersionUID = 1L;
+
     private final String errorCode;
 
     protected StowException(String errorCode, String message) {

@@ -184,6 +184,40 @@ class StorageMaintenanceTest {
     }
 
     @Test
+    void missingPermanentlyFailedFileStillConvergesToDeadLettered() throws Exception {
+        Path root = Files.createTempDirectory(Path.of("target"), "dead-letter-missing-");
+        Path mount = root.resolve("volume");
+        Path physical = mount.resolve(TENANT).resolve(KEY + ".bin");
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(root.resolve("metadata"), SqliteConnectionFactory.defaults(), clock);
+        SqliteQuotaRepository quota = new SqliteQuotaRepository(
+                root.resolve("quota"), SqliteConnectionFactory.defaults(), clock, ignored -> 10);
+        UUID lease = UUID.randomUUID();
+        TestJournal journal = new TestJournal(List.of(
+                event(1, QueueEventType.ACCEPTED, FileProcessingStatus.PENDING, null, physical),
+                event(2, QueueEventType.PROCESSING_STARTED, FileProcessingStatus.PROCESSING, lease, physical),
+                event(3, QueueEventType.PROCESSING_FAILED, FileProcessingStatus.PERMANENTLY_FAILED, lease, physical)));
+        quota.reserve(TENANT, KEY, "/");
+        QueueProjectionService projection = projection(root, journal, metadata, quota, clock);
+        projection.projectTenantUntilCaughtUp(TENANT, 32);
+        PermanentFailureReaper reaper = new PermanentFailureReaper(
+                journal, metadata, projection, List.of(new TestVolume("volume-a", mount)), clock);
+
+        // The physical file is already gone (removed externally or lost with its
+        // volume): the row must still converge instead of retrying forever.
+        var result = reaper.run(java.time.Duration.ZERO, 100, PermanentlyFailedDisposition.MOVE_TO_DEAD_LETTER);
+
+        assertThat(result.succeededCount()).isEqualTo(1);
+        assertThat(result.failedCount()).isZero();
+        assertThat(metadata.find(TENANT, KEY)).isEmpty();
+        assertThat(quota.tenantCurrentCount(TENANT)).isZero();
+        assertThat(journal.events)
+                .filteredOn(event -> event.eventType() == QueueEventType.DEAD_LETTERED)
+                .hasSize(1);
+    }
+
+    @Test
     void keepDispositionDoesNotTouchPhysicalFileOrProjection() throws Exception {
         Path root = Files.createTempDirectory(Path.of("target"), "dead-letter-keep-");
         Path mount = root.resolve("volume");

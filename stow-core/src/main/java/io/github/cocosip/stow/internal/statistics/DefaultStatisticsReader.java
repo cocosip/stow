@@ -20,7 +20,9 @@ public final class DefaultStatisticsReader implements StatisticsRecorder {
                         configuration.windowSize(),
                         configuration.retention(),
                         configuration.maxSeries(),
-                        EnumSet.of(StatisticDimension.OPERATION))
+                        // Matches the original's default retention: volume and watcher
+                        // dimensions stay queryable; the tenant dimension stays off.
+                        EnumSet.of(StatisticDimension.OPERATION, StatisticDimension.VOLUME, StatisticDimension.WATCHER))
                 : new NoopStatisticsRecorder(clock);
     }
 

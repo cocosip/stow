@@ -8,7 +8,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.random.RandomGenerator;
 
-final class PowerOfTwoVolumeSelector {
+/** Orders write candidates with the power-of-two-choices sampling used by the original design. */
+public final class PowerOfTwoVolumeSelector {
 
     private final VolumeRegistry registry;
     private final RandomGenerator random;
@@ -24,6 +25,19 @@ final class PowerOfTwoVolumeSelector {
 
     synchronized List<StorageVolume> orderedWriteCandidates(long requiredBytes) {
         List<StorageVolume> writable = registry.writableVolumes(requiredBytes);
+        if (writable.isEmpty()) {
+            throw new InsufficientStorageException("No healthy storage volume has enough available capacity");
+        }
+        return ordered(writable, random);
+    }
+
+    /**
+     * Orders writable volumes: two pseudo-random candidates lead, the one with more free
+     * space first, and the remainder follow ordered by available capacity as fallbacks.
+     */
+    public static List<StorageVolume> ordered(List<StorageVolume> writable, RandomGenerator random) {
+        Objects.requireNonNull(writable, "writable");
+        Objects.requireNonNull(random, "random");
         if (writable.isEmpty()) {
             throw new InsufficientStorageException("No healthy storage volume has enough available capacity");
         }

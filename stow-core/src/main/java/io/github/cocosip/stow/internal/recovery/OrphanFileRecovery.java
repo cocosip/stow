@@ -149,7 +149,9 @@ public final class OrphanFileRecovery {
         boolean createdReservation = false;
         try {
             if (quota.reservation(tenantId, fileKey).isEmpty()) {
-                quota.reserve(tenantId, fileKey, "/");
+                // Recovery re-adopts the file unconditionally; enforcing the limit here
+                // would leave physical orphans stranded at a full quota forever.
+                quota.forceReserve(tenantId, fileKey, "/");
                 createdReservation = true;
             }
             BasicFileAttributes attributes =

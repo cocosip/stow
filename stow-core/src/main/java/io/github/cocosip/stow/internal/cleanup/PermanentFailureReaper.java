@@ -71,31 +71,37 @@ public final class PermanentFailureReaper {
         CleanupStatisticsBuilder statistics = new CleanupStatisticsBuilder(clock);
         long cutoff = clock.instant().minus(olderThan).toEpochMilli();
         for (String tenantId : journal.tenantIds().stream().sorted().toList()) {
-            List<SqliteMetadataProjectionStore.FileRow> rows = metadata.activeFiles(tenantId).stream()
-                    .filter(row -> row.status() == FileProcessingStatus.PERMANENTLY_FAILED)
-                    .filter(row -> (row.lastFailedAtMillis() == null ? row.createdAtMillis() : row.lastFailedAtMillis())
-                            <= cutoff)
-                    .limit(batchSizePerTenant)
-                    .toList();
-            for (SqliteMetadataProjectionStore.FileRow row : rows) {
-                statistics.scanned();
-                statistics.tenant(tenantId);
-                if (disposition == PermanentlyFailedDisposition.KEEP) {
-                    statistics.skipped();
-                    continue;
-                }
-                try {
-                    StorageVolume volume = volume(row);
-                    if (disposition == PermanentlyFailedDisposition.MOVE_TO_DEAD_LETTER) {
-                        moveToDeadLetter(row, volume);
-                    } else {
-                        delete(row, volume);
+            // Drain until every aged row has been touched once in this run. KEEP rows never
+            // converge by design; rows whose projection has not caught up are left to the
+            // next cycle rather than re-appending their terminal event.
+            java.util.Set<String> processed = new java.util.HashSet<>();
+            while (true) {
+                List<SqliteMetadataProjectionStore.FileRow> rows = metadata.activeFiles(tenantId).stream()
+                        .filter(row -> row.status() == FileProcessingStatus.PERMANENTLY_FAILED)
+                        .filter(row ->
+                                (row.lastFailedAtMillis() == null ? row.createdAtMillis() : row.lastFailedAtMillis())
+                                        <= cutoff)
+                        .filter(row -> processed.add(row.fileKey()))
+                        .limit(batchSizePerTenant)
+                        .toList();
+                if (rows.isEmpty()) break;
+                for (SqliteMetadataProjectionStore.FileRow row : rows) {
+                    statistics.scanned();
+                    statistics.tenant(tenantId);
+                    if (disposition == PermanentlyFailedDisposition.KEEP) {
+                        statistics.skipped();
+                        continue;
                     }
-                    appender.append(event(row));
-                    project(tenantId);
-                    statistics.succeeded(tenantId, row.fileSize());
-                } catch (RuntimeException exception) {
-                    statistics.failed(tenantId, "permanent-failure", exception);
+                    try {
+                        Path finalLocation = disposition == PermanentlyFailedDisposition.MOVE_TO_DEAD_LETTER
+                                ? moveToDeadLetter(row, volume(row))
+                                : delete(row, volume(row));
+                        appender.append(event(row, finalLocation));
+                        project(tenantId);
+                        statistics.succeeded(tenantId, row.fileSize());
+                    } catch (RuntimeException exception) {
+                        statistics.failed(tenantId, "permanent-failure", exception);
+                    }
                 }
             }
         }
@@ -116,20 +122,26 @@ public final class PermanentFailureReaper {
         return volume;
     }
 
-    private void delete(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
+    private Path delete(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
         Path source = Path.of(row.physicalPath());
         if (Files.exists(source, LinkOption.NOFOLLOW_LINKS)) volume.delete(source);
         if (Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
             throw new IllegalStateException("Physical file still exists after delete: " + source);
         }
+        return source;
     }
 
-    private void moveToDeadLetter(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
+    private Path moveToDeadLetter(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
         Path source = Path.of(row.physicalPath());
         Path target = deadLetterPath(row, volume);
-        if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS) && Files.exists(target, LinkOption.NOFOLLOW_LINKS)) return;
         if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IllegalStateException("Physical file does not exist: " + source);
+            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                return target; // crash between move and journal append: the move already happened
+            }
+            // The file is already gone (removed externally or lost with its volume);
+            // converge to DEAD_LETTERED instead of retrying forever, and record the
+            // last known path like the original does for missing files.
+            return source;
         }
         Path targetParent = target.getParent();
         if (targetParent == null) {
@@ -144,6 +156,7 @@ public final class PermanentFailureReaper {
         if (Files.exists(source, LinkOption.NOFOLLOW_LINKS) || !Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
             throw new IllegalStateException("Dead-letter move did not complete");
         }
+        return target;
     }
 
     private Path deadLetterPath(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
@@ -169,7 +182,7 @@ public final class PermanentFailureReaper {
         return target.resolve(fileName.toString()).normalize();
     }
 
-    private QueueEventRecord event(SqliteMetadataProjectionStore.FileRow row) {
+    private QueueEventRecord event(SqliteMetadataProjectionStore.FileRow row, Path physicalPath) {
         return new QueueEventRecord(
                 1,
                 java.util.UUID.randomUUID(),
@@ -179,7 +192,7 @@ public final class PermanentFailureReaper {
                 clock.instant(),
                 1,
                 row.volumeId(),
-                Path.of(row.physicalPath()),
+                physicalPath,
                 row.logicalDirectory(),
                 row.fileSize(),
                 FileProcessingStatus.DEAD_LETTERED,

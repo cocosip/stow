@@ -81,8 +81,10 @@ class LeaseProjectionFailureTest {
             assertThat(observedFailure.get()).hasMessage("injected projection read failure");
 
             projection.projectTenantUntilCaughtUp("tenant-a", 20);
+            // Completion appends PROCESSING_COMPLETED and DELETE_REQUESTED together, so
+            // the projected row converges to the delete-requested state.
             assertThat(metadata.find("tenant-a", lease.fileKey()).orElseThrow().status())
-                    .isEqualTo(FileProcessingStatus.COMPLETED);
+                    .isEqualTo(FileProcessingStatus.DELETE_REQUESTED);
         }
     }
 

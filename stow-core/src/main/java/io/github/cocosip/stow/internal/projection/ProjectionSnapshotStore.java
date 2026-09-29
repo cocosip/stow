@@ -56,7 +56,7 @@ public final class ProjectionSnapshotStore {
             Files.createDirectories(parent);
             ObjectNode document = mapper.valueToTree(snapshot.withoutChecksum(mapper));
             byte[] canonical = mapper.writeValueAsBytes(document);
-            document.put("crc32", crc32(canonical));
+            document.put("contentCrc32", crc32(canonical));
             byte[] bytes = mapper.writeValueAsBytes(document);
             Path temporary = target.resolveSibling("." + target.getFileName() + ".tmp");
             Files.write(temporary, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
@@ -74,7 +74,8 @@ public final class ProjectionSnapshotStore {
             Path target = path(tenantId);
             if (!Files.exists(target)) return null;
             ObjectNode document = (ObjectNode) mapper.readTree(Files.readAllBytes(target));
-            JsonNode checksum = document.remove("crc32");
+            JsonNode checksum = document.remove("contentCrc32");
+            if (checksum == null) checksum = document.remove("crc32"); // pre-release name
             if (checksum == null || !checksum.isIntegralNumber())
                 throw new IllegalStateException("Snapshot CRC is missing");
             long expected = checksum.longValue();
@@ -84,12 +85,26 @@ public final class ProjectionSnapshotStore {
             for (JsonNode event : document.path("events")) {
                 events.add(mapper.treeToValue(event, EventDocument.class).toEvent());
             }
+            List<SqliteMetadataProjectionStore.FileRow> files = new ArrayList<>();
+            for (JsonNode file : document.path("files")) {
+                if (file.isObject())
+                    files.add(mapper.treeToValue(file, FileDocument.class).toRow());
+            }
+            QuotaState quotas = document.hasNonNull("quotas")
+                    ? mapper.treeToValue(document.get("quotas"), QuotaDocument.class)
+                            .toState()
+                    : null;
             Snapshot snapshot = new Snapshot(
                     document.path("tenantId").asText(),
                     document.path("baseOffset").asLong(),
                     document.path("nextOffset").asLong(),
                     document.path("lastSequenceNumber").asLong(),
-                    events);
+                    events,
+                    document.hasNonNull("createdAt")
+                            ? Instant.parse(document.get("createdAt").asText())
+                            : null,
+                    files,
+                    quotas);
             if (!tenantId.equals(snapshot.tenantId())) throw new IllegalStateException("Snapshot tenant mismatch");
             return snapshot;
         } catch (IOException | RuntimeException exception) {
@@ -105,13 +120,31 @@ public final class ProjectionSnapshotStore {
     }
 
     public record Snapshot(
-            String tenantId, long baseOffset, long nextOffset, long lastSequenceNumber, List<QueueEventRecord> events) {
+            String tenantId,
+            long baseOffset,
+            long nextOffset,
+            long lastSequenceNumber,
+            List<QueueEventRecord> events,
+            Instant createdAt,
+            List<SqliteMetadataProjectionStore.FileRow> files,
+            QuotaState quotas) {
+
+        public Snapshot(
+                String tenantId,
+                long baseOffset,
+                long nextOffset,
+                long lastSequenceNumber,
+                List<QueueEventRecord> events) {
+            this(tenantId, baseOffset, nextOffset, lastSequenceNumber, events, null, null, null);
+        }
+
         public Snapshot {
             if (tenantId == null || !tenantId.matches("[A-Za-z0-9._-]{1,128}"))
                 throw new IllegalArgumentException("tenantId is not valid");
             if (baseOffset < 0 || nextOffset < baseOffset || lastSequenceNumber < 0)
                 throw new IllegalArgumentException("snapshot offsets are invalid");
             events = List.copyOf(events == null ? List.of() : events);
+            files = files == null ? null : List.copyOf(files);
         }
 
         private ObjectNode withoutChecksum(ObjectMapper mapper) {
@@ -123,6 +156,14 @@ public final class ProjectionSnapshotStore {
             node.put("lastSequenceNumber", lastSequenceNumber);
             var array = node.putArray("events");
             for (QueueEventRecord event : events) array.add(mapper.valueToTree(EventDocument.from(event)));
+            if (createdAt != null) node.put("createdAt", createdAt.toString());
+            if (files != null) {
+                var filesArray = node.putArray("files");
+                for (SqliteMetadataProjectionStore.FileRow file : files) {
+                    filesArray.add(mapper.valueToTree(FileDocument.from(file)));
+                }
+            }
+            if (quotas != null) node.set("quotas", mapper.valueToTree(QuotaDocument.from(quotas)));
             return node;
         }
 
@@ -131,6 +172,105 @@ public final class ProjectionSnapshotStore {
             return events;
         }
     }
+
+    public record QuotaState(long tenantCurrentCount, Long tenantLimit, List<DirectoryQuotaEntry> directories) {
+        public QuotaState {
+            directories = directories == null ? List.of() : List.copyOf(directories);
+        }
+    }
+
+    public record DirectoryQuotaEntry(String logicalDirectory, long currentCount, Long maxCount) {}
+
+    private record FileDocument(
+            String fileKey,
+            String tenantId,
+            String volumeId,
+            String physicalPath,
+            String logicalDirectory,
+            long fileSize,
+            long createdAtMillis,
+            FileProcessingStatus status,
+            int retryCount,
+            Long lastFailedAtMillis,
+            String lastError,
+            Long availableAtMillis,
+            Long completedAtMillis,
+            String originalFileName,
+            String fileExtension,
+            String importOperationId) {
+
+        static FileDocument from(SqliteMetadataProjectionStore.FileRow row) {
+            return new FileDocument(
+                    row.fileKey(),
+                    row.tenantId(),
+                    row.volumeId(),
+                    row.physicalPath(),
+                    row.logicalDirectory(),
+                    row.fileSize(),
+                    row.createdAtMillis(),
+                    row.status(),
+                    row.retryCount(),
+                    row.lastFailedAtMillis(),
+                    row.lastError(),
+                    row.availableAtMillis(),
+                    row.completedAtMillis(),
+                    row.originalFileName(),
+                    row.fileExtension(),
+                    row.importOperationId());
+        }
+
+        SqliteMetadataProjectionStore.FileRow toRow() {
+            // Live-lease and row bookkeeping fields are never part of a snapshot: a
+            // snapshot is taken when the projector has caught up past those events.
+            return new SqliteMetadataProjectionStore.FileRow(
+                    fileKey,
+                    tenantId,
+                    volumeId,
+                    physicalPath,
+                    logicalDirectory,
+                    fileSize,
+                    createdAtMillis,
+                    status,
+                    retryCount,
+                    lastFailedAtMillis,
+                    lastError,
+                    null,
+                    null,
+                    completedAtMillis,
+                    null,
+                    null,
+                    availableAtMillis,
+                    originalFileName,
+                    fileExtension,
+                    null,
+                    importOperationId,
+                    0,
+                    0);
+        }
+    }
+
+    private record QuotaDocument(long tenantCurrentCount, Long tenantLimit, List<DirectoryDocument> directories) {
+
+        static QuotaDocument from(QuotaState state) {
+            List<DirectoryDocument> directories = new ArrayList<>();
+            for (DirectoryQuotaEntry entry : state.directories()) {
+                directories.add(
+                        new DirectoryDocument(entry.logicalDirectory(), entry.currentCount(), entry.maxCount()));
+            }
+            return new QuotaDocument(state.tenantCurrentCount(), state.tenantLimit(), directories);
+        }
+
+        QuotaState toState() {
+            List<DirectoryQuotaEntry> directories = new ArrayList<>();
+            for (DirectoryDocument directory : this.directories) {
+                directories.add(new DirectoryQuotaEntry(
+                        directory.logicalDirectory(), directory.currentCount(), directory.maxCount()));
+            }
+            return new QuotaState(tenantCurrentCount, tenantLimit, directories);
+        }
+    }
+
+    private record DirectoryDocument(String logicalDirectory, long currentCount, Long maxCount) {}
 
     private record EventDocument(
             int schemaVersion,

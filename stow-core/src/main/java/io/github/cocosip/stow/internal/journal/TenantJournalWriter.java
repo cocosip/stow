@@ -29,12 +29,16 @@ public final class TenantJournalWriter implements AutoCloseable {
     private final JournalStateStore stateStore;
     private final ArrayBlockingQueue<Pending> queue;
     private final Consumer<WriteResult> resultConsumer;
+    private final Runnable stateFlusher;
     private final FileChannel channel;
     private final AtomicBoolean accepting = new AtomicBoolean(true);
     private final AtomicInteger queuedRecords = new AtomicInteger();
     private final Thread worker;
     private volatile Throwable failure;
     private long nextOffset;
+    private long lastForceNanos;
+    private long lastStateFlushNanos = System.nanoTime();
+    private boolean stateDirty;
 
     public TenantJournalWriter(
             String tenantId,
@@ -43,6 +47,17 @@ public final class TenantJournalWriter implements AutoCloseable {
             JournalConfiguration configuration,
             long initialOffset,
             Consumer<WriteResult> resultConsumer) {
+        this(tenantId, tenantDirectory, codec, configuration, initialOffset, resultConsumer, () -> {});
+    }
+
+    public TenantJournalWriter(
+            String tenantId,
+            Path tenantDirectory,
+            JournalCodec codec,
+            JournalConfiguration configuration,
+            long initialOffset,
+            Consumer<WriteResult> resultConsumer,
+            Runnable stateFlusher) {
         this.tenantId = tenantId;
         this.log = tenantDirectory.resolve("queue.log");
         this.codec = codec;
@@ -50,6 +65,7 @@ public final class TenantJournalWriter implements AutoCloseable {
         this.stateStore = new JournalStateStore(tenantDirectory);
         this.queue = new ArrayBlockingQueue<>(configuration.asyncQueueCapacityPerTenant());
         this.resultConsumer = resultConsumer;
+        this.stateFlusher = stateFlusher;
         this.nextOffset = initialOffset;
         try {
             this.channel = FileChannel.open(
@@ -77,7 +93,8 @@ public final class TenantJournalWriter implements AutoCloseable {
         if (!accepting.get()) {
             throw new IllegalStateException("Journal writer is closed");
         }
-        if (failure != null) {
+        if (failure != null && !worker.isAlive()) {
+            // The worker thread is gone; nothing will drain the queue anymore.
             throw new DatabaseRecoveryException("Journal writer failed for tenant " + tenantId, failure);
         }
         int count = events.size();
@@ -120,20 +137,12 @@ public final class TenantJournalWriter implements AutoCloseable {
             while (accepting.get() || !queue.isEmpty()) {
                 Pending first = queue.poll(100, TimeUnit.MILLISECONDS);
                 if (first == null) {
+                    flushStateIfDue();
                     continue;
                 }
                 queuedRecords.addAndGet(-first.events.size());
-                List<Pending> batch = new ArrayList<>();
-                batch.add(first);
-                while (batch.size() < configuration.maxBatchRecords()) {
-                    Pending next = queue.poll();
-                    if (next == null) {
-                        break;
-                    }
-                    queuedRecords.addAndGet(-next.events.size());
-                    batch.add(next);
-                }
-                write(batch);
+                write(collect(first));
+                flushStateIfDue();
             }
         } catch (InterruptedException exception) {
             if (accepting.get()) {
@@ -147,25 +156,53 @@ public final class TenantJournalWriter implements AutoCloseable {
         }
     }
 
-    private void write(List<Pending> batch) {
+    /** Coalesces queued records up to the configured record and byte bounds, lingering for stragglers. */
+    private Batch collect(Pending first) throws InterruptedException {
+        List<Pending> batch = new ArrayList<>();
+        List<byte[]> frames = new ArrayList<>();
+        long bytes = encodeInto(first, frames);
+        batch.add(first);
+        long lingerMillis = configuration.linger().toMillis();
+        while (batch.size() < configuration.maxBatchRecords() && bytes < configuration.maxBatchBytes()) {
+            Pending next = queue.poll();
+            if (next == null && lingerMillis > 0) {
+                next = queue.poll(lingerMillis, TimeUnit.MILLISECONDS);
+            }
+            if (next == null) break;
+            queuedRecords.addAndGet(-next.events.size());
+            batch.add(next);
+            bytes += encodeInto(next, frames);
+        }
+        return new Batch(batch, frames);
+    }
+
+    private long encodeInto(Pending pending, List<byte[]> frames) {
+        long bytes = 0;
+        for (QueueEventRecord event : pending.events) {
+            byte[] frame = codec.encode(event);
+            frames.add(frame);
+            bytes += frame.length;
+        }
+        return bytes;
+    }
+
+    private void write(Batch collected) {
+        List<Pending> batch = collected.pendings();
         try {
             boolean wrote = false;
-            long lastSequence = 0;
-            for (Pending pending : batch) {
-                for (QueueEventRecord event : pending.events) {
-                    byte[] bytes = codec.encode(event);
-                    writeFully(ByteBuffer.wrap(bytes));
-                    nextOffset += bytes.length;
-                    lastSequence = event.sequenceNumber();
-                    wrote = true;
-                }
-            }
-            if (configuration.ackMode() == JournalAckMode.DURABLE && wrote) {
-                channel.force(true);
+            for (byte[] frame : collected.frames()) {
+                writeFully(ByteBuffer.wrap(frame));
+                nextOffset += frame.length;
+                wrote = true;
             }
             if (wrote) {
-                resultConsumer.accept(new WriteResult(nextOffset, lastSequence));
+                forceAccordingToAckMode();
+                resultConsumer.accept(new WriteResult(nextOffset, lastSequenceOf(batch)));
+                stateDirty = true;
             }
+            // A successful batch clears the previous failure: one bad append must not
+            // permanently take the tenant journal down.
+            failure = null;
             for (Pending pending : batch) {
                 pending.completion.complete(null);
             }
@@ -174,6 +211,48 @@ public final class TenantJournalWriter implements AutoCloseable {
             for (Pending pending : batch) {
                 pending.completion.completeExceptionally(throwable);
             }
+        }
+    }
+
+    private static long lastSequenceOf(List<Pending> batch) {
+        long last = 0;
+        for (Pending pending : batch) {
+            for (QueueEventRecord event : pending.events) {
+                last = event.sequenceNumber();
+            }
+        }
+        return last;
+    }
+
+    private void forceAccordingToAckMode() throws IOException {
+        if (configuration.ackMode() == JournalAckMode.DURABLE) {
+            channel.force(true);
+            lastForceNanos = System.nanoTime();
+        } else if (configuration.ackMode() == JournalAckMode.BALANCED) {
+            // fsync immediately with no backlog and at least once per flush window
+            // under load, bounding the durability gap acknowledged events can span.
+            long window = configuration.balancedFlushWindow().toNanos();
+            if (queue.isEmpty() || System.nanoTime() - lastForceNanos >= window) {
+                channel.force(true);
+                lastForceNanos = System.nanoTime();
+            }
+        }
+    }
+
+    private void flushStateIfDue() {
+        if (!stateDirty) return;
+        if (System.nanoTime() - lastStateFlushNanos
+                < configuration.stateFlushDebounce().toNanos()) return;
+        flushStateNow();
+    }
+
+    private void flushStateNow() {
+        stateDirty = false;
+        lastStateFlushNanos = System.nanoTime();
+        try {
+            stateFlusher.run();
+        } catch (RuntimeException ignored) {
+            // The state file is a rebuildable hint; the journal remains the source of truth.
         }
     }
 
@@ -204,6 +283,7 @@ public final class TenantJournalWriter implements AutoCloseable {
         }
         // Put a barrier through the live worker before asking it to stop.
         flush();
+        flushStateNow();
         if (!accepting.getAndSet(false)) {
             return;
         }
@@ -223,6 +303,8 @@ public final class TenantJournalWriter implements AutoCloseable {
     }
 
     public record WriteResult(long tailOffset, long lastSequenceNumber) {}
+
+    private record Batch(List<Pending> pendings, List<byte[]> frames) {}
 
     private static final class Pending {
         private final List<QueueEventRecord> events;

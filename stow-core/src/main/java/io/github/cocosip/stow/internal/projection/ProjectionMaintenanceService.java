@@ -1,20 +1,30 @@
 package io.github.cocosip.stow.internal.projection;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.cocosip.stow.api.QueueProjectionMaintenance;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.ProjectionTenantState;
 import io.github.cocosip.stow.spi.QueueEventJournal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
+@SuppressFBWarnings(
+        value = "EI_EXPOSE_REP2",
+        justification = "The maintenance service intentionally shares the runtime-owned projection and quota stores.")
 public final class ProjectionMaintenanceService implements QueueProjectionMaintenance {
+
+    private static final int CATCH_UP_BATCH = 4_096;
 
     private final QueueEventJournal journal;
     private final QueueProjectionService projection;
     private final ProjectionCursorStore cursors;
     private final ProjectionSnapshotStore snapshots;
     private final QueueEventReducer reducer;
+    private final SqliteMetadataProjectionStore metadata;
+    private final io.github.cocosip.stow.internal.quota.SqliteQuotaRepository quota;
 
     public ProjectionMaintenanceService(
             QueueEventJournal journal,
@@ -30,11 +40,24 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
             ProjectionCursorStore cursors,
             ProjectionSnapshotStore snapshots,
             QueueEventReducer reducer) {
+        this(journal, projection, cursors, snapshots, reducer, null, null);
+    }
+
+    public ProjectionMaintenanceService(
+            QueueEventJournal journal,
+            QueueProjectionService projection,
+            ProjectionCursorStore cursors,
+            ProjectionSnapshotStore snapshots,
+            QueueEventReducer reducer,
+            SqliteMetadataProjectionStore metadata,
+            io.github.cocosip.stow.internal.quota.SqliteQuotaRepository quota) {
         this.journal = java.util.Objects.requireNonNull(journal, "journal");
         this.projection = projection;
         this.cursors = java.util.Objects.requireNonNull(cursors, "cursors");
         this.snapshots = java.util.Objects.requireNonNull(snapshots, "snapshots");
         this.reducer = reducer;
+        this.metadata = metadata;
+        this.quota = quota;
     }
 
     @Override
@@ -43,13 +66,15 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
         long tail = journal.tailOffset(tenantId);
         ProjectionCursorStore.Cursor cursor = cursors.load(tenantId);
         long projected = Math.max(base, Math.min(cursor.nextOffset(), tail));
+        ProjectionSnapshotStore.Snapshot snapshot = snapshots.load(tenantId);
+        Instant snapshotAt = snapshot == null || snapshot.createdAt() == null ? Instant.EPOCH : snapshot.createdAt();
         return new ProjectionTenantState(
                 tenantId,
                 base,
                 tail,
                 projected,
                 cursor.lastSequenceNumber(),
-                snapshots.load(tenantId) == null ? Instant.EPOCH : Instant.now(),
+                snapshotAt,
                 projected == tail ? HealthStatus.UP : HealthStatus.DEGRADED);
     }
 
@@ -62,6 +87,16 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
 
     @Override
     public synchronized ProjectionTenantState snapshot(String tenantId) {
+        // The contract only allows snapshots from a caught-up projector; try to catch
+        // up first, then refuse a cursor outside the journal bounds as before.
+        if (projection != null) {
+            try {
+                projection.projectTenantUntilCaughtUp(tenantId, CATCH_UP_BATCH);
+            } catch (RuntimeException ignored) {
+                // A transient projection failure must not make snapshots unavailable;
+                // the bounds check below still enforces consistency.
+            }
+        }
         long base = journal.baseOffset(tenantId);
         long tail = journal.tailOffset(tenantId);
         ProjectionCursorStore.Cursor cursor = cursors.load(tenantId);
@@ -72,7 +107,14 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
         List<io.github.cocosip.stow.model.QueueEventRecord> events =
                 readThrough(tenantId, state.baseOffset(), state.projectedOffset());
         snapshots.save(new ProjectionSnapshotStore.Snapshot(
-                tenantId, state.baseOffset(), state.projectedOffset(), state.lastSequence(), events));
+                tenantId,
+                state.baseOffset(),
+                state.projectedOffset(),
+                state.lastSequence(),
+                events,
+                java.time.Clock.systemUTC().instant(),
+                activeFiles(tenantId),
+                quotaState(tenantId)));
         return state;
     }
 
@@ -86,6 +128,13 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
         }
         if (snapshot == null || snapshot.nextOffset() != state.tailOffset()) snapshot(tenantId);
         journal.compact(tenantId, state.tailOffset());
+        // With a snapshot plus compaction covering the sequence, the applied-event
+        // ledgers for compacted events are dead weight (space only, never correctness).
+        if (snapshot != null) {
+            long throughSequence = snapshot.lastSequenceNumber();
+            if (metadata != null) metadata.pruneAppliedEvents(tenantId, throughSequence);
+            if (quota != null) quota.pruneAppliedQuotaEvents(tenantId, throughSequence);
+        }
     }
 
     @Override
@@ -114,7 +163,31 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
                         events.get(events.size() - 1).eventId(),
                         Instant.now());
         cursors.save(cursor);
+        // A metadata-only replay skips quota side effects by design, so the counts are
+        // recomputed from the restored active set once the replay converges.
+        if (quota != null && metadata != null) {
+            quota.rebuildFromMetadata(tenantId, metadata.activeFiles(tenantId));
+        }
         return state(tenantId);
+    }
+
+    private List<io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore.FileRow> activeFiles(
+            String tenantId) {
+        return metadata == null ? null : metadata.activeFiles(tenantId);
+    }
+
+    private ProjectionSnapshotStore.QuotaState quotaState(String tenantId) {
+        if (quota == null || metadata == null) return null;
+        List<io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore.FileRow> files =
+                metadata.activeFiles(tenantId);
+        Map<String, Long> counts = new LinkedHashMap<>();
+        for (var file : files) counts.merge(file.logicalDirectory(), 1L, Long::sum);
+        List<ProjectionSnapshotStore.DirectoryQuotaEntry> directories = new ArrayList<>();
+        for (var entry : counts.entrySet()) {
+            long limit = quota.directoryLimit(tenantId, entry.getKey());
+            directories.add(new ProjectionSnapshotStore.DirectoryQuotaEntry(entry.getKey(), entry.getValue(), limit));
+        }
+        return new ProjectionSnapshotStore.QuotaState(files.size(), quota.tenantLimit(tenantId), directories);
     }
 
     private List<io.github.cocosip.stow.model.QueueEventRecord> readThrough(String tenantId, long offset, long end) {

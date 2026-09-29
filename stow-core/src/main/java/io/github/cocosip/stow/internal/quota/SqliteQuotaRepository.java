@@ -97,27 +97,17 @@ public final class SqliteQuotaRepository {
             TenantRow tenant = tenantRow(connection);
             DirectoryRow directory = directoryRow(connection, normalized);
             if (tenant.maxCount() != 0 && tenant.currentCount() >= tenant.maxCount()) {
-                throw new TenantQuotaExceededException("Tenant quota exceeded: " + tenantId);
+                throw new TenantQuotaExceededException(tenantId, tenant.currentCount(), tenant.maxCount());
             }
             if (directory.enabled() && directory.maxCount() != 0 && directory.currentCount() >= directory.maxCount()) {
-                throw new DirectoryQuotaExceededException("Directory quota exceeded: " + normalized);
+                throw new DirectoryQuotaExceededException(normalized, directory.currentCount(), directory.maxCount());
             }
 
             incrementTenant(connection, tenant);
             incrementDirectory(connection, normalized, directory);
             QuotaReservation reservation =
                     new QuotaReservation(UUID.randomUUID().toString(), fileKey, normalized);
-            try (PreparedStatement statement = connection.prepareStatement(
-                    """
-                    INSERT INTO quota_reservations(reservation_id, file_key, logical_directory, created_at_ms)
-                    VALUES(?, ?, ?, ?)
-                    """)) {
-                statement.setString(1, reservation.reservationId());
-                statement.setString(2, fileKey);
-                statement.setString(3, normalized);
-                statement.setLong(4, nowMillis());
-                statement.executeUpdate();
-            }
+            insertReservation(connection, reservation);
             return reservation;
         });
     }
@@ -151,13 +141,9 @@ public final class SqliteQuotaRepository {
             if (!events.mark(connection, eventId, sequenceNumber, nowMillis())) {
                 return null;
             }
-            try (PreparedStatement statement =
-                    connection.prepareStatement("DELETE FROM quota_reservations WHERE reservation_id=?")) {
-                statement.setString(1, reservationId);
-                if (statement.executeUpdate() != 1) {
-                    throw new ProjectionException("Quota reservation does not exist: " + reservationId);
-                }
-            }
+            // The reservation row is intentionally kept until release: it remembers the
+            // directory the charge was made against so a later DELETE release decrements
+            // the same directory even if the projected event lost the original one.
             return null;
         });
     }
@@ -170,11 +156,7 @@ public final class SqliteQuotaRepository {
                 return null;
             }
             decrementCounts(connection, reservation.orElseThrow().logicalDirectory());
-            try (PreparedStatement statement =
-                    connection.prepareStatement("DELETE FROM quota_reservations WHERE reservation_id=?")) {
-                statement.setString(1, reservationId);
-                statement.executeUpdate();
-            }
+            deleteReservation(connection, reservationId);
             return null;
         });
     }
@@ -182,31 +164,99 @@ public final class SqliteQuotaRepository {
     public void release(String tenantId, String eventId, long sequenceNumber, String fileKey, String logicalDirectory) {
         requireFileKey(fileKey);
         events.validate(eventId, sequenceNumber);
-        String normalized = normalizeDirectory(tenantId, logicalDirectory);
         write(tenantId, connection -> {
             if (!events.mark(connection, eventId, sequenceNumber, nowMillis())) {
                 return null;
             }
-            decrementCounts(connection, normalized);
+            // Release against the charged directory: the surviving reservation row is
+            // authoritative, the event directory is only the fallback.
+            String charged = reservationDirectoryByFileKey(connection, fileKey)
+                    .orElse(normalizeDirectory(tenantId, logicalDirectory));
+            decrementCounts(connection, charged);
+            try (PreparedStatement statement =
+                    connection.prepareStatement("DELETE FROM quota_reservations WHERE file_key=?")) {
+                statement.setString(1, fileKey);
+                statement.executeUpdate();
+            }
             return null;
         });
     }
 
+    /** Charges the counts unconditionally, bypassing limit checks; used by orphan recovery. */
+    public QuotaReservation forceReserve(String tenantId, String fileKey, String logicalDirectory) {
+        requireFileKey(fileKey);
+        String normalized = normalizeDirectory(tenantId, logicalDirectory);
+        return write(tenantId, connection -> {
+            ensureDirectory(connection, normalized);
+            incrementTenant(connection, tenantRow(connection));
+            incrementDirectory(connection, normalized, directoryRow(connection, normalized));
+            QuotaReservation reservation =
+                    new QuotaReservation(UUID.randomUUID().toString(), fileKey, normalized);
+            insertReservation(connection, reservation);
+            return reservation;
+        });
+    }
+
+    /**
+     * Reconciles persisted reservations against projected facts once projections are
+     * current: an established fact keeps the charge (its reservation row is retained
+     * for the eventual release), a missing fact rolls the charge back.
+     */
+    public void reconcileReservations(String tenantId, java.util.Set<String> activeFileKeys) {
+        write(tenantId, connection -> {
+            for (QuotaReservation reservation : allReservations(connection)) {
+                if (activeFileKeys.contains(reservation.fileKey())) continue;
+                decrementCounts(connection, reservation.logicalDirectory());
+                deleteReservation(connection, reservation.reservationId());
+            }
+            return null;
+        });
+    }
+
+    public long directoryLimit(String tenantId, String logicalDirectory) {
+        String normalized = normalizeDirectory(tenantId, logicalDirectory);
+        return read(tenantId, connection -> {
+            try (PreparedStatement statement =
+                    connection.prepareStatement("SELECT max_count FROM directory_quotas WHERE logical_directory=?")) {
+                statement.setString(1, normalized);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? result.getLong(1) : 0L;
+                }
+            }
+        });
+    }
+
+    /**
+     * Recomputes counts from the projected active set. Explicit directory limits are
+     * preserved (rebuilding changes counts, never policy), and in-flight reservations
+     * keep their charges so a concurrent consume or rollback stays consistent.
+     */
     public void rebuildFromMetadata(String tenantId, java.util.List<SqliteMetadataProjectionStore.FileRow> files) {
         write(tenantId, connection -> {
             long now = nowMillis();
-            try (PreparedStatement clear = connection.prepareStatement(
-                    "DELETE FROM quota_reservations; DELETE FROM applied_quota_events; DELETE FROM directory_quotas")) {
-                clear.executeUpdate();
-            }
-            try (PreparedStatement reset = connection.prepareStatement(
-                    "UPDATE tenant_quota SET current_count=0, updated_at_ms=?, row_version=row_version+1 WHERE singleton_id=1")) {
-                reset.setLong(1, now);
-                reset.executeUpdate();
+            try (PreparedStatement zero = connection.prepareStatement(
+                    "UPDATE directory_quotas SET current_count=0, updated_at_ms=?, row_version=row_version+1")) {
+                zero.setLong(1, now);
+                zero.executeUpdate();
             }
             java.util.Map<String, Long> counts = new java.util.HashMap<>();
             for (SqliteMetadataProjectionStore.FileRow file : files)
                 counts.merge(file.logicalDirectory(), 1L, Long::sum);
+            // Reservation rows for active files were already consumed (the row is kept
+            // for the release); only reservations without an active file still carry a
+            // live charge and must contribute to the recomputed counts.
+            java.util.Set<String> activeKeys = new java.util.HashSet<>();
+            for (SqliteMetadataProjectionStore.FileRow file : files) activeKeys.add(file.fileKey());
+            long liveReservations = 0;
+            try (PreparedStatement reservationCounts = connection.prepareStatement(
+                            "SELECT file_key, logical_directory, COUNT(*) FROM quota_reservations GROUP BY file_key, logical_directory");
+                    ResultSet result = reservationCounts.executeQuery()) {
+                while (result.next()) {
+                    if (activeKeys.contains(result.getString(1))) continue;
+                    counts.merge(result.getString(2), result.getLong(3), Long::sum);
+                    liveReservations += result.getLong(3);
+                }
+            }
             for (var entry : counts.entrySet()) {
                 ensureDirectory(connection, entry.getKey());
                 try (PreparedStatement update = connection.prepareStatement(
@@ -217,11 +267,27 @@ public final class SqliteQuotaRepository {
                     update.executeUpdate();
                 }
             }
+            try (PreparedStatement prune =
+                    connection.prepareStatement("DELETE FROM directory_quotas WHERE current_count=0 AND max_count=0")) {
+                prune.executeUpdate();
+            }
             try (PreparedStatement update = connection.prepareStatement(
                     "UPDATE tenant_quota SET current_count=?, updated_at_ms=?, row_version=row_version+1 WHERE singleton_id=1")) {
-                update.setLong(1, files.size());
+                update.setLong(1, files.size() + liveReservations);
                 update.setLong(2, now);
                 update.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    /** Deletes applied-quota-event ledger rows up to a compacted sequence. */
+    public void pruneAppliedQuotaEvents(String tenantId, long throughSequence) {
+        write(tenantId, connection -> {
+            try (PreparedStatement statement =
+                    connection.prepareStatement("DELETE FROM applied_quota_events WHERE sequence_number<=?")) {
+                statement.setLong(1, throughSequence);
+                statement.executeUpdate();
             }
             return null;
         });
@@ -348,6 +414,51 @@ public final class SqliteQuotaRepository {
                     return Optional.empty();
                 }
                 return Optional.of(new QuotaReservation(result.getString(1), result.getString(2), result.getString(3)));
+            }
+        }
+    }
+
+    private void insertReservation(Connection connection, QuotaReservation reservation) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                """
+                INSERT INTO quota_reservations(reservation_id, file_key, logical_directory, created_at_ms)
+                VALUES(?, ?, ?, ?)
+                """)) {
+            statement.setString(1, reservation.reservationId());
+            statement.setString(2, reservation.fileKey());
+            statement.setString(3, reservation.logicalDirectory());
+            statement.setLong(4, nowMillis());
+            statement.executeUpdate();
+        }
+    }
+
+    private static void deleteReservation(Connection connection, String reservationId) throws SQLException {
+        try (PreparedStatement statement =
+                connection.prepareStatement("DELETE FROM quota_reservations WHERE reservation_id=?")) {
+            statement.setString(1, reservationId);
+            statement.executeUpdate();
+        }
+    }
+
+    private static java.util.List<QuotaReservation> allReservations(Connection connection) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT reservation_id, file_key, logical_directory FROM quota_reservations");
+                ResultSet result = statement.executeQuery()) {
+            java.util.List<QuotaReservation> reservations = new java.util.ArrayList<>();
+            while (result.next()) {
+                reservations.add(new QuotaReservation(result.getString(1), result.getString(2), result.getString(3)));
+            }
+            return reservations;
+        }
+    }
+
+    private static Optional<String> reservationDirectoryByFileKey(Connection connection, String fileKey)
+            throws SQLException {
+        try (PreparedStatement statement =
+                connection.prepareStatement("SELECT logical_directory FROM quota_reservations WHERE file_key=?")) {
+            statement.setString(1, fileKey);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(result.getString(1)) : Optional.empty();
             }
         }
     }

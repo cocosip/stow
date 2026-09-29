@@ -13,6 +13,9 @@ import io.github.cocosip.stow.config.StowConfiguration;
 import io.github.cocosip.stow.config.VolumeConfiguration;
 import io.github.cocosip.stow.exception.RuntimeDirectoryLockedException;
 import io.github.cocosip.stow.exception.RuntimeNotReadyException;
+import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
+import io.github.cocosip.stow.internal.sqlite.SqliteConnectionFactory;
+import io.github.cocosip.stow.model.FileProcessingStatus;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.PostImportAction;
 import io.github.cocosip.stow.model.StatisticsQuery;
@@ -322,6 +325,7 @@ class DefaultStowRuntimeTest {
                 .build();
 
         try (StowRuntime runtime = Stow.open(configuration)) {
+            assertThat(runtime.state()).isEqualTo(RuntimeState.RUNNING);
             Thread.sleep(100);
             assertThat(database).doesNotExist();
         }
@@ -360,6 +364,7 @@ class DefaultStowRuntimeTest {
                 .build();
 
         try (StowRuntime runtime = Stow.open(configuration)) {
+            assertThat(runtime.state()).isEqualTo(RuntimeState.RUNNING);
             await().atMost(Duration.ofSeconds(2))
                     .untilAsserted(() -> assertThat(database).exists());
         }
@@ -446,8 +451,56 @@ class DefaultStowRuntimeTest {
             assertThat(statistics.readCount()).isEqualTo(1);
             assertThat(statistics.claimCount()).isEqualTo(1);
             assertThat(statistics.completedCount()).isEqualTo(1);
-            assertThat(statistics.sqlitePersistenceOperationCount()).isEqualTo(3);
+            // ACCEPTED + PROCESSING_STARTED + PROCESSING_COMPLETED + DELETE_REQUESTED
+            assertThat(statistics.sqlitePersistenceOperationCount()).isEqualTo(4);
             assertThat(runtime.health().components()).containsKeys("runtime", "projection", "volume:volume-a");
+        }
+    }
+
+    @Test
+    void reconcilesLeakedQuotaReservationsAtStartup() throws Exception {
+        Path root = temporaryDirectory.resolve("quota-reconcile");
+        StowConfiguration configuration = configurationWithVolume(root)
+                .preconfiguredTenants(List.of("tenant-a"))
+                .build();
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            runtime.tenantQuotaManager().setLimit("tenant-a", 2);
+        }
+        // Simulate a crash after the quota reservation but before the journal append.
+        String leakedKey = "0123456789abcdef0123456789abcdef";
+        SqliteQuotaRepository leaked = new SqliteQuotaRepository(
+                root.resolve("quota"), SqliteConnectionFactory.defaults(), Clock.systemUTC(), ignored -> 2);
+        leaked.reserve("tenant-a", leakedKey, "/");
+        assertThat(leaked.tenantCurrentCount("tenant-a")).isEqualTo(1);
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            var tenant = runtime.tenantManager().get("tenant-a");
+            // The leaked charge is rolled back, so both writes fit inside the limit of 2.
+            runtime.storagePool().write(tenant, ContentSources.of(new byte[] {1}), null);
+            runtime.storagePool().write(tenant, ContentSources.of(new byte[] {2}), null);
+        }
+    }
+
+    @Test
+    void rebuildsDamagedMetadataProjectionAtStartup() throws Exception {
+        Path root = temporaryDirectory.resolve("db-selfheal");
+        StowConfiguration configuration = configurationWithVolume(root)
+                .preconfiguredTenants(List.of("tenant-a"))
+                .build();
+        String fileKey;
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            var tenant = runtime.tenantManager().get("tenant-a");
+            fileKey = runtime.storagePool().write(tenant, ContentSources.of(new byte[] {1}), null);
+        }
+        Path database = root.resolve("metadata").resolve("tenant-a").resolve("metadata.db");
+        Files.deleteIfExists(database.resolveSibling("metadata.db-wal"));
+        Files.deleteIfExists(database.resolveSibling("metadata.db-shm"));
+        Files.writeString(database, "this is not a sqlite database");
+
+        try (StowRuntime runtime = Stow.open(configuration)) {
+            var tenant = runtime.tenantManager().get("tenant-a");
+            // The corrupt projection is rebuilt from the journal; the file survives.
+            assertThat(runtime.storagePool().status(tenant, fileKey)).isEqualTo(FileProcessingStatus.PENDING);
         }
     }
 

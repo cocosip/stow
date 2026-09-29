@@ -236,8 +236,8 @@ class SqliteConnectionFactoryTest {
     }
 
     private static void openAndClose(SqliteConnectionFactory factory) throws SQLException {
-        try (Connection ignored = factory.open("tenant-a")) {
-            // Opening the connection is the behavior under test.
+        try (Connection connection = factory.open("tenant-a")) {
+            assertThat(connection.isClosed()).isFalse();
         }
     }
 

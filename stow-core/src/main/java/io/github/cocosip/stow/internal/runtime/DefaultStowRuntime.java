@@ -32,6 +32,8 @@ import io.github.cocosip.stow.internal.projection.SqliteMetadataProjectionStore;
 import io.github.cocosip.stow.internal.quota.DefaultDirectoryQuotaManager;
 import io.github.cocosip.stow.internal.quota.DefaultTenantQuotaManager;
 import io.github.cocosip.stow.internal.quota.SqliteQuotaRepository;
+import io.github.cocosip.stow.internal.recovery.DatabaseHealthService;
+import io.github.cocosip.stow.internal.recovery.DatabaseRecoveryService;
 import io.github.cocosip.stow.internal.scheduler.DefaultStoragePool;
 import io.github.cocosip.stow.internal.scheduler.ProcessingTimeoutRecovery;
 import io.github.cocosip.stow.internal.scheduler.TerminalLeaseIndex;
@@ -42,26 +44,34 @@ import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherAutoManager;
 import io.github.cocosip.stow.internal.watcher.DefaultFileWatcherManager;
 import io.github.cocosip.stow.internal.watcher.SourceCleanupStore;
 import io.github.cocosip.stow.internal.watcher.SourceCleanupWorker;
+import io.github.cocosip.stow.model.CleanupStatistics;
+import io.github.cocosip.stow.model.ComponentHealth;
+import io.github.cocosip.stow.model.DatabaseHealthReport;
 import io.github.cocosip.stow.model.HealthStatus;
 import io.github.cocosip.stow.model.RuntimeHealth;
 import io.github.cocosip.stow.spi.JournalCodec;
 import io.github.cocosip.stow.spi.QueueEventJournal;
 import io.github.cocosip.stow.spi.StorageVolume;
 import io.github.cocosip.stow.spi.StorageVolumeProvider;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 @SuppressFBWarnings(
@@ -97,6 +107,10 @@ public final class DefaultStowRuntime implements StowRuntime {
     private SourceCleanupWorker sourceCleanupWorker;
     private DefaultStatisticsReader statisticsReaderService;
     private List<StorageVolume> storageVolumes = List.of();
+    private final AtomicInteger projectionRotation = new AtomicInteger();
+    private final Map<String, Instant> lastSnapshotAt = new ConcurrentHashMap<>();
+    private volatile Instant lastBackgroundReclaimAt;
+    private volatile Instant lastOptimizeAt;
 
     DefaultStowRuntime(
             StowConfiguration configuration,
@@ -345,8 +359,8 @@ public final class DefaultStowRuntime implements StowRuntime {
                 activeCache,
                 failure -> runtimeHealth.update("projection", HealthStatus.DEGRADED, message(failure)),
                 terminalLeases::record);
-        projectionMaintenanceService =
-                new ProjectionMaintenanceService(eventJournal, projectionService, cursors, snapshots, reducer);
+        projectionMaintenanceService = new ProjectionMaintenanceService(
+                eventJournal, projectionService, cursors, snapshots, reducer, metadataProjection, quotaRepository);
 
         if (!storageVolumes.isEmpty()) {
             storagePoolService = new DefaultStoragePool(
@@ -360,7 +374,11 @@ public final class DefaultStowRuntime implements StowRuntime {
                     configuration.retry(),
                     appender,
                     statisticsReaderService.recorder(),
-                    terminalLeases);
+                    terminalLeases,
+                    new DefaultStoragePool.PoolSettings(
+                            configuration.storage().emptyQueueReclaimBatchSize(),
+                            configuration.cleanup().processingTimeout(),
+                            configuration.storage().completionGuardStripes()));
             ProcessingTimeoutRecovery timeoutRecovery = new ProcessingTimeoutRecovery(
                     storagePoolService, configuration.cleanup().processingTimeout());
             storageMaintenanceService = new DefaultStorageMaintenance(
@@ -410,8 +428,107 @@ public final class DefaultStowRuntime implements StowRuntime {
                     workerExecutor,
                     scheduler);
         }
+        recoverDatabasesAtStartup();
         replayJournal(cursors);
+        reconcileQuotaReservations();
         runtimeHealth.update("projection", HealthStatus.UP, "ready");
+    }
+
+    /**
+     * Checks every projected database at startup and rebuilds damaged ones from the
+     * snapshot plus journal, matching the original's startup self-healing behavior.
+     * Connections are per-operation, so the corrupt files can be moved aside before
+     * any live operation touches them.
+     */
+    private void recoverDatabasesAtStartup() {
+        DatabaseHealthService health = new DatabaseHealthService(
+                configuration.paths().metadataDirectory(), configuration.paths().quotaDirectory(), clock);
+        DatabaseHealthReport report = health.checkDatabases();
+        if (report.databases().values().stream().allMatch(c -> c.status() != HealthStatus.DOWN)) return;
+        DatabaseRecoveryService recovery = new DatabaseRecoveryService(
+                configuration.paths().metadataDirectory(),
+                configuration.paths().quotaDirectory(),
+                eventJournal,
+                configuration.sqlite(),
+                clock,
+                tenantId -> ((DefaultTenantManager) tenantManager).quotaLimit(tenantId));
+        for (Map.Entry<String, ComponentHealth> entry : report.databases().entrySet()) {
+            if (entry.getValue().status() != HealthStatus.DOWN) continue;
+            int separator = entry.getKey().indexOf('/');
+            if (separator < 0) continue;
+            String database = entry.getKey().substring(0, separator);
+            String tenantId = entry.getKey().substring(separator + 1);
+            try {
+                // Metadata rebuild replays the snapshot plus journal into a fresh
+                // database after backing the corrupt file up; the quota rebuild then
+                // recomputes counts from the recovered metadata.
+                if (database.equals("metadata")) {
+                    recovery.rebuildMetadata(tenantId);
+                    recovery.rebuildQuota(tenantId);
+                } else if (database.equals("quota")) {
+                    recovery.rebuildQuota(tenantId);
+                }
+            } catch (RuntimeException failure) {
+                throw new IllegalStateException(
+                        "Unable to recover damaged " + database + " database for tenant " + tenantId, failure);
+            }
+        }
+    }
+
+    private void reconcileQuotaReservations() {
+        // Union of journal tenants and quota-database tenants: a crash between the quota
+        // reservation and the journal append leaves a tenant that the journal never saw.
+        java.util.Set<String> tenantIds = new java.util.HashSet<>(eventJournal.tenantIds());
+        Path quotaRoot = configuration.paths().quotaDirectory();
+        if (java.nio.file.Files.isDirectory(quotaRoot)) {
+            try (var directories = java.nio.file.Files.list(quotaRoot)) {
+                directories
+                        .filter(java.nio.file.Files::isDirectory)
+                        .map(path -> path.getFileName().toString())
+                        .filter(name -> name.matches("[A-Za-z0-9._-]{1,128}"))
+                        .forEach(tenantIds::add);
+            } catch (java.io.IOException exception) {
+                throw new IllegalStateException("Unable to enumerate quota tenants for reconciliation", exception);
+            }
+        }
+        for (String tenantId : tenantIds) {
+            java.util.Set<String> activeFileKeys = new java.util.HashSet<>();
+            for (SqliteMetadataProjectionStore.FileRow row : metadataProjection.activeFiles(tenantId)) {
+                activeFileKeys.add(row.fileKey());
+            }
+            quotaRepository.reconcileReservations(tenantId, activeFileKeys);
+        }
+    }
+
+    /**
+     * Automatic snapshot and compaction for a caught-up tenant, honoring the configured
+     * byte thresholds; the journal would otherwise grow without bound.
+     */
+    private void maybeSnapshotAndCompact(String tenantId) {
+        try {
+            var configuration = this.configuration;
+            long processedBytes = eventJournal.tailOffset(tenantId) - eventJournal.baseOffset(tenantId);
+            if (processedBytes <= 0) return;
+            var state = projectionMaintenanceService.state(tenantId);
+            if (state.projectedOffset() != state.tailOffset()) return;
+            Instant now = clock.instant();
+            Instant previous = lastSnapshotAt.get(tenantId);
+            if (configuration.snapshot().enabled()
+                    && processedBytes >= configuration.snapshot().minimumProgressBytes()
+                    && (previous == null
+                            || !now.isBefore(
+                                    previous.plus(configuration.snapshot().interval())))) {
+                projectionMaintenanceService.snapshot(tenantId);
+                lastSnapshotAt.put(tenantId, now);
+            }
+            if (configuration.compaction().enabled()
+                    && processedBytes >= configuration.compaction().minimumProcessedBytes()) {
+                projectionMaintenanceService.compact(tenantId);
+                lastSnapshotAt.put(tenantId, now);
+            }
+        } catch (RuntimeException failure) {
+            runtimeHealth.update("projection", HealthStatus.DEGRADED, message(failure));
+        }
     }
 
     private void rebuildTerminalLeaseIndex(TerminalLeaseIndex terminalLeases) {
@@ -481,11 +598,45 @@ public final class DefaultStowRuntime implements StowRuntime {
     }
 
     private void runCleanupCycle() {
-        storageMaintenanceService.reclaimTimedOutProcessing(
-                configuration.cleanup().processingTimeout());
+        if (configuration.storage().backgroundReclaimEnabled()) {
+            Instant now = clock.instant();
+            Duration cooldown = configuration.storage().reclaimCooldown();
+            Instant previous = lastBackgroundReclaimAt;
+            if (previous == null || !now.isBefore(previous.plus(cooldown))) {
+                storagePoolService.recoverTimedOut(
+                        configuration.cleanup().processingTimeout(),
+                        configuration.storage().backgroundReclaimBatchSize());
+                lastBackgroundReclaimAt = now;
+            }
+        }
         storageMaintenanceService.cleanupCompleted(configuration.cleanup().completedRetention());
         storageMaintenanceService.cleanupPermanentlyFailed(
                 configuration.cleanup().failedRetention());
+        // Housekeeping the original schedules alongside the cleanup cycle. Write-path
+        // temporary files are intentionally NOT swept here (they belong to in-flight
+        // writes; startup owns their removal).
+        silentMaintenance(storageMaintenanceService::cleanupInvalidDatabaseBackups);
+        silentMaintenance(storageMaintenanceService::cleanupEmptyDirectories);
+        // VACUUM takes the database write lock, so it runs daily like the original's
+        // scheduled maintenance instead of on every cycle.
+        Instant now = clock.instant();
+        Instant previousOptimize = lastOptimizeAt;
+        if (previousOptimize == null || !now.isBefore(previousOptimize.plus(Duration.ofHours(24)))) {
+            lastOptimizeAt = now;
+            try {
+                storageMaintenanceService.optimizeDatabases();
+            } catch (RuntimeException ignored) {
+                // VACUUM fails benignly under concurrent writers; the next day retries.
+            }
+        }
+    }
+
+    private void silentMaintenance(java.util.function.Supplier<CleanupStatistics> action) {
+        try {
+            action.get();
+        } catch (RuntimeException failure) {
+            runtimeHealth.update("cleanup", HealthStatus.DEGRADED, message(failure));
+        }
     }
 
     private Runnable monitored(String component, Runnable action) {
@@ -517,12 +668,9 @@ public final class DefaultStowRuntime implements StowRuntime {
         for (StorageVolume volume : volumes) {
             try {
                 volume.close();
-            } catch (Exception exception) {
-                RuntimeException current = exception instanceof RuntimeException runtime
-                        ? runtime
-                        : new IllegalStateException("Unable to close storage volume", exception);
-                if (failure == null) failure = current;
-                else failure.addSuppressed(current);
+            } catch (RuntimeException exception) {
+                if (failure == null) failure = exception;
+                else failure.addSuppressed(exception);
             }
         }
         if (failure != null) throw failure;
@@ -597,12 +745,21 @@ public final class DefaultStowRuntime implements StowRuntime {
                 long deadline = System.nanoTime()
                         + configuration.projection().cycleTimeBudget().toNanos();
                 int tenants = 0;
-                for (String tenantId :
-                        eventJournal.tenantIds().stream().sorted().toList()) {
-                    if (tenants++ >= configuration.projection().maxTenantsPerCycle() || System.nanoTime() >= deadline)
-                        break;
-                    busy |= projectionService.projectTenant(
+                List<String> tenantIds =
+                        eventJournal.tenantIds().stream().sorted().toList();
+                int limit = configuration.projection().maxTenantsPerCycle();
+                // Rotate the start index so every tenant is eventually served even when
+                // the per-cycle budget is smaller than the tenant count.
+                int start =
+                        tenantIds.isEmpty() ? 0 : Math.floorMod(projectionRotation.getAndAdd(limit), tenantIds.size());
+                for (int index = 0; index < tenantIds.size() && tenants < limit; index++) {
+                    if (System.nanoTime() >= deadline) break;
+                    String tenantId = tenantIds.get((start + index) % tenantIds.size());
+                    boolean tenantBusy = projectionService.projectTenant(
                             tenantId, configuration.projection().maxRecordsPerTenantCycle());
+                    busy |= tenantBusy;
+                    tenants++;
+                    if (!tenantBusy) maybeSnapshotAndCompact(tenantId);
                 }
                 runtimeHealth.update("projection", HealthStatus.UP, "ready");
             } catch (RuntimeException failure) {

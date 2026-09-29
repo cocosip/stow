@@ -5,6 +5,9 @@ import java.nio.file.Path;
 
 public interface StorageVolume extends AutoCloseable {
 
+    @Override
+    void close();
+
     String id();
 
     Path mountPath();

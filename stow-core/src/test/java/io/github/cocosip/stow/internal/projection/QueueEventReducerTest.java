@@ -51,7 +51,9 @@ class QueueEventReducerTest {
                 .get()
                 .extracting(SqliteMetadataProjectionStore.FileRow::status)
                 .isEqualTo(FileProcessingStatus.PROCESSING);
-        assertThat(quota.reservation(TENANT, KEY)).isEmpty();
+        // The reservation row survives consumption so the release can decrement the
+        // originally charged directory.
+        assertThat(quota.reservation(TENANT, KEY)).isPresent();
         assertThat(reservation).isNotNull();
     }
 

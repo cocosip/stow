@@ -136,16 +136,17 @@ class SqliteQuotaRepositoryTest {
     }
 
     @Test
-    void rejectsFirstConsumeWhenReservationDoesNotExistAndRollsBackEvent() throws Exception {
+    void consumeToleratesMissingReservationWithoutRollingBackTheEvent() throws Exception {
         SqliteQuotaRepository repository = repository(10);
         QuotaReservation reservation = repository.reserve(TENANT_ID, FILE_KEY, "/incoming");
 
-        assertThatThrownBy(() -> repository.consume(TENANT_ID, "accepted-event", 41, "missing-reservation"))
-                .isInstanceOf(ProjectionException.class);
+        // The projection pipeline must not wedge when the reservation is already gone;
+        // the original tolerates a missing reservation and so does the release path.
+        repository.consume(TENANT_ID, "accepted-event", 41, "missing-reservation");
 
         assertThat(repository.reservation(TENANT_ID, FILE_KEY)).contains(reservation);
         assertThat(repository.tenantCurrentCount(TENANT_ID)).isEqualTo(1);
-        assertThat(appliedEventCount()).isZero();
+        assertThat(appliedEventCount()).isEqualTo(1);
     }
 
     @Test
@@ -162,12 +163,45 @@ class SqliteQuotaRepositoryTest {
         reopened.consume(TENANT_ID, "accepted-event", 100, toConsume.reservationId());
         reopened.rollback(TENANT_ID, toRollback.reservationId());
 
-        assertThat(reopened.reservation(TENANT_ID, FILE_KEY)).isEmpty();
+        // Consumption keeps the reservation row until release; only rollback removes it.
+        assertThat(reopened.reservation(TENANT_ID, FILE_KEY)).contains(toConsume);
         assertThat(reopened.reservation(TENANT_ID, secondFileKey())).isEmpty();
         assertThat(reopened.tenantCurrentCount(TENANT_ID)).isEqualTo(1);
         assertThat(reopened.directoryQuota(TENANT_ID, "/incoming").currentCount())
                 .isEqualTo(1);
         assertThat(reopened.directoryQuota(TENANT_ID, "/other").currentCount()).isZero();
+    }
+
+    @Test
+    void reconcileReservationsRollsBackLeakedCharges() {
+        SqliteQuotaRepository repository = repository(10);
+        repository.reserve(TENANT_ID, FILE_KEY, "/incoming");
+        repository.reserve(TENANT_ID, secondFileKey(), "/other");
+
+        // FILE_KEY projects as an active file; the other reservation leaked (a crash
+        // between reservation and journal admission) and must release its charge.
+        repository.reconcileReservations(TENANT_ID, java.util.Set.of(FILE_KEY));
+
+        assertThat(repository.reservation(TENANT_ID, FILE_KEY)).isPresent();
+        assertThat(repository.reservation(TENANT_ID, secondFileKey())).isEmpty();
+        assertThat(repository.tenantCurrentCount(TENANT_ID)).isEqualTo(1);
+        assertThat(repository.directoryQuota(TENANT_ID, "/other").currentCount())
+                .isZero();
+    }
+
+    @Test
+    void forceReserveBypassesLimitChecksForRecovery() {
+        SqliteQuotaRepository repository = repository(1);
+        repository.reserve(TENANT_ID, FILE_KEY, "/incoming");
+        assertThatThrownBy(() -> repository.reserve(TENANT_ID, secondFileKey(), "/incoming"))
+                .isInstanceOf(TenantQuotaExceededException.class);
+
+        // Orphan recovery re-adopts files unconditionally; a full quota must not
+        // strand physical files without a projected row.
+        QuotaReservation forced = repository.forceReserve(TENANT_ID, secondFileKey(), "/incoming");
+
+        assertThat(repository.tenantCurrentCount(TENANT_ID)).isEqualTo(2);
+        assertThat(repository.reservation(TENANT_ID, secondFileKey())).contains(forced);
     }
 
     private SqliteQuotaRepository repository(long initialLimit) {

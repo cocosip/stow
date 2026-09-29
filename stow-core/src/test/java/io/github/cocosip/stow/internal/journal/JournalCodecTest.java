@@ -241,7 +241,7 @@ class JournalCodecTest {
 
     private static byte[] jsonLineWithCrc(ObjectNode node) throws Exception {
         CRC32 crc = new CRC32();
-        ObjectNode withoutCrc = (ObjectNode) node.deepCopy();
+        ObjectNode withoutCrc = node.deepCopy();
         withoutCrc.remove("payloadCrc32");
         crc.update(QueueEventJson.MAPPER.writeValueAsBytes(withoutCrc));
         node.put("payloadCrc32", crc.getValue());

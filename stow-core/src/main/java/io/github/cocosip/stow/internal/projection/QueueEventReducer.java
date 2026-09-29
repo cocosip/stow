@@ -170,7 +170,7 @@ public final class QueueEventReducer {
                 Math.max(current.retryCount() + 1, e.retryCount()),
                 e.occurredAt().toEpochMilli(),
                 e.errorMessage(),
-                millis(e.availableAt(), e.occurredAt()),
+                e.status() == FileProcessingStatus.PERMANENTLY_FAILED ? null : millis(e.availableAt(), e.occurredAt()),
                 e.sequenceNumber(),
                 e.fileKey());
     }
@@ -204,7 +204,10 @@ public final class QueueEventReducer {
         update(
                 c,
                 e,
-                "UPDATE files SET status=?, lease_id=NULL, processing_started_at_ms=NULL, completed_at_ms=?, last_event_sequence=?, row_version=row_version+1 WHERE file_key=?",
+                """
+                UPDATE files SET status=?, lease_id=NULL, processing_started_at_ms=NULL, completed_at_ms=?,
+                    last_error=NULL, last_failed_at_ms=NULL, available_at_ms=NULL, last_event_sequence=?, row_version=row_version+1 WHERE file_key=?
+                """,
                 FileProcessingStatus.COMPLETED.ordinal(),
                 e.occurredAt().toEpochMilli(),
                 e.sequenceNumber(),

@@ -18,6 +18,8 @@ public final class JunkFileCleaner {
             "^\\.[0-9a-f]{32}(?:\\.[A-Za-z0-9._-]{1,31})?\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.tmp$");
     private static final Pattern DATABASE_BACKUP =
             Pattern.compile("^(?:metadata|quotas)\\.db\\.corrupt\\.[0-9]+\\.bak$");
+    private static final int MAX_SHARDING_DEPTH = 3;
+    private static final int MAX_SCAN_DEPTH = 20;
     private final List<StorageVolume> volumes;
     private final List<Path> databaseRoots;
     private final Clock clock;
@@ -73,9 +75,12 @@ public final class JunkFileCleaner {
         for (StorageVolume volume : volumes) {
             Path root = volume.mountPath().toAbsolutePath().normalize();
             if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) continue;
-            try (var paths = Files.walk(root)) {
+            try (var paths = Files.walk(root, MAX_SCAN_DEPTH)) {
                 paths.filter(path -> !path.equals(root))
                         .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+                        // Tenant roots and the sharding skeleton are structural: the original
+                        // never deletes them, and concurrent writers rely on them existing.
+                        .filter(path -> relativeDepth(root, path) > MAX_SHARDING_DEPTH + 1)
                         .sorted(Comparator.reverseOrder())
                         .forEach(path -> {
                             try (var children = Files.list(path)) {
@@ -98,6 +103,10 @@ public final class JunkFileCleaner {
             }
         }
         return statistics.build();
+    }
+
+    private static int relativeDepth(Path root, Path path) {
+        return root.relativize(path.toAbsolutePath().normalize()).getNameCount();
     }
 
     private static void delete(Path path, Path root, CleanupStatisticsBuilder statistics) {

@@ -65,40 +65,51 @@ public final class CompletedFileReaper {
         CleanupStatisticsBuilder statistics = new CleanupStatisticsBuilder(clock);
         Instant cutoff = clock.instant().minus(olderThan);
         for (String tenantId : journal.tenantIds().stream().sorted().toList()) {
-            List<SqliteMetadataProjectionStore.FileRow> rows = metadata.activeFiles(tenantId).stream()
-                    .filter(row -> eligible(row, cutoff))
-                    .limit(batchSizePerTenant)
-                    .toList();
-            for (SqliteMetadataProjectionStore.FileRow row : rows) {
-                statistics.scanned();
-                statistics.tenant(tenantId);
-                if (row.status() == FileProcessingStatus.COMPLETED) {
+            // Drain until every eligible row has been touched once in this run, so large
+            // backlogs do not wait for one batch per cleanup interval. Rows whose
+            // projection has not caught up are left to the next cycle.
+            java.util.Set<String> requested = new java.util.HashSet<>();
+            java.util.Set<String> deleted = new java.util.HashSet<>();
+            while (true) {
+                List<SqliteMetadataProjectionStore.FileRow> toRequest = metadata.activeFiles(tenantId).stream()
+                        .filter(row -> row.status() == FileProcessingStatus.COMPLETED)
+                        .filter(row ->
+                                row.completedAtMillis() != null && row.completedAtMillis() <= cutoff.toEpochMilli())
+                        .filter(row -> requested.add(row.fileKey()))
+                        .limit(batchSizePerTenant)
+                        .toList();
+                List<SqliteMetadataProjectionStore.FileRow> toDelete = metadata.activeFiles(tenantId).stream()
+                        .filter(row -> row.status() == FileProcessingStatus.DELETE_REQUESTED)
+                        // Physical deletion still honors the retention window; it is
+                        // anchored on the completion time like the original.
+                        .filter(row ->
+                                row.completedAtMillis() == null || row.completedAtMillis() <= cutoff.toEpochMilli())
+                        .filter(row -> deleted.add(row.fileKey()))
+                        .limit(batchSizePerTenant)
+                        .toList();
+                if (toRequest.isEmpty() && toDelete.isEmpty()) break;
+                for (SqliteMetadataProjectionStore.FileRow row : toRequest) {
+                    statistics.scanned();
+                    statistics.tenant(tenantId);
                     try {
                         requestDelete(row);
                     } catch (RuntimeException exception) {
                         statistics.failed(tenantId, "delete-request", exception);
                     }
                 }
-            }
-            for (SqliteMetadataProjectionStore.FileRow row : metadata.activeFiles(tenantId).stream()
-                    .filter(candidate -> candidate.status() == FileProcessingStatus.DELETE_REQUESTED)
-                    .limit(batchSizePerTenant)
-                    .toList()) {
-                try {
-                    delete(row);
-                    statistics.succeeded(tenantId, row.fileSize());
-                } catch (RuntimeException exception) {
-                    statistics.failed(tenantId, "delete", exception);
+                for (SqliteMetadataProjectionStore.FileRow row : toDelete) {
+                    statistics.scanned();
+                    statistics.tenant(tenantId);
+                    try {
+                        delete(row);
+                        statistics.succeeded(tenantId, row.fileSize());
+                    } catch (RuntimeException exception) {
+                        statistics.failed(tenantId, "delete", exception);
+                    }
                 }
             }
         }
         return statistics.build();
-    }
-
-    private boolean eligible(SqliteMetadataProjectionStore.FileRow row, Instant cutoff) {
-        if (row.status() == FileProcessingStatus.DELETE_REQUESTED) return true;
-        if (row.status() != FileProcessingStatus.COMPLETED) return false;
-        return row.completedAtMillis() != null && row.completedAtMillis() <= cutoff.toEpochMilli();
     }
 
     private void requestDelete(SqliteMetadataProjectionStore.FileRow row) {

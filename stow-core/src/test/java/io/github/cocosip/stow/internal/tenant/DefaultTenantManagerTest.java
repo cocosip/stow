@@ -154,7 +154,10 @@ class DefaultTenantManagerTest {
 
     private static final class SignalingLock extends ReentrantLock {
 
-        private final CountDownLatch awaitingAcquisition = new CountDownLatch(1);
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
+
+        private final transient CountDownLatch awaitingAcquisition = new CountDownLatch(1);
 
         void lockForTest() {
             super.lock();

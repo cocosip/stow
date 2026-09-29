@@ -97,7 +97,7 @@ class SourceCleanupWorkerTest {
         SourceCleanupStore store = mock(SourceCleanupStore.class);
         SourceFileRelocator relocator = mock(SourceFileRelocator.class);
         SourceCleanupJob job = job(SourceCleanupAction.DELETE, 0, 5, Path.of("failed"));
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         when(relocator.deleteIfMatching(job.sourcePath(), job.fingerprint()))
                 .thenReturn(SourceFileRelocator.Status.COMPLETED);
 
@@ -113,7 +113,7 @@ class SourceCleanupWorkerTest {
         SourceCleanupStore store = mock(SourceCleanupStore.class);
         SourceFileRelocator relocator = mock(SourceFileRelocator.class);
         SourceCleanupJob job = job(SourceCleanupAction.MOVE, 0, 5, Path.of("failed"));
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         when(relocator.moveIfMatching(job.sourcePath(), job.moveTargetPath(), job.fingerprint()))
                 .thenReturn(new SourceFileRelocator.Result(SourceFileRelocator.Status.COMPLETED, job.moveTargetPath()));
 
@@ -128,7 +128,7 @@ class SourceCleanupWorkerTest {
         SourceCleanupStore store = mock(SourceCleanupStore.class);
         SourceFileRelocator relocator = mock(SourceFileRelocator.class);
         SourceCleanupJob job = job(SourceCleanupAction.DELETE, 0, 5, Path.of("failed"));
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         when(relocator.deleteIfMatching(job.sourcePath(), job.fingerprint()))
                 .thenReturn(SourceFileRelocator.Status.FINGERPRINT_MISMATCH);
 
@@ -143,7 +143,7 @@ class SourceCleanupWorkerTest {
         SourceCleanupStore store = mock(SourceCleanupStore.class);
         SourceFileRelocator relocator = mock(SourceFileRelocator.class);
         SourceCleanupJob job = job(SourceCleanupAction.DELETE, 2, 5, Path.of("failed"));
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         doThrow(new IOException("locked")).when(relocator).deleteIfMatching(job.sourcePath(), job.fingerprint());
 
         SourceCleanupWorker.CycleResult result = enabledWorker(store, relocator).runCycle();
@@ -164,7 +164,7 @@ class SourceCleanupWorkerTest {
         Path quarantine = job.failureDirectory()
                 .resolve(job.watcherId())
                 .resolve(job.sourcePath().getFileName());
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         doThrow(new IOException("locked")).when(relocator).deleteIfMatching(job.sourcePath(), job.fingerprint());
         when(relocator.moveIfMatching(job.sourcePath(), quarantine, job.fingerprint()))
                 .thenReturn(new SourceFileRelocator.Result(SourceFileRelocator.Status.COMPLETED, quarantine));
@@ -180,7 +180,7 @@ class SourceCleanupWorkerTest {
         SourceCleanupStore store = mock(SourceCleanupStore.class);
         SourceFileRelocator relocator = mock(SourceFileRelocator.class);
         SourceCleanupJob job = job(SourceCleanupAction.DELETE, 0, 1, Path.of("failed"));
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         doThrow(new IOException("locked")).when(relocator).deleteIfMatching(job.sourcePath(), job.fingerprint());
         when(relocator.moveIfMatching(eq(job.sourcePath()), any(), eq(job.fingerprint())))
                 .thenThrow(new IOException("still locked"));
@@ -201,7 +201,7 @@ class SourceCleanupWorkerTest {
         SourceCleanupJob job = job(SourceCleanupAction.DELETE, 0, 5, Path.of("failed"));
         CountDownLatch actionStarted = new CountDownLatch(1);
         CountDownLatch releaseAction = new CountDownLatch(1);
-        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job), List.of());
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
         doAnswer(invocation -> {
                     actionStarted.countDown();
                     assertThat(releaseAction.await(2, TimeUnit.SECONDS)).isTrue();

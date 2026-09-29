@@ -68,10 +68,12 @@ public final class SqliteMetadataProjectionStore {
 
     private final SqliteConnectionFactory connections;
     private final SqliteSchemaManager schema = new SqliteSchemaManager(1);
+    private final SqliteConfiguration configuration;
     private final Clock clock;
 
     public SqliteMetadataProjectionStore(Path metadataDirectory, SqliteConfiguration configuration, Clock clock) {
         connections = new SqliteConnectionFactory(metadataDirectory, "metadata.db", configuration);
+        this.configuration = configuration;
         this.clock = clock;
     }
 
@@ -93,6 +95,7 @@ public final class SqliteMetadataProjectionStore {
             try {
                 T result = operation.run(connection);
                 connection.commit();
+                if (configuration.checkpointAfterBatch()) checkpoint(connection);
                 return result;
             } catch (SQLException | RuntimeException failure) {
                 try {
@@ -106,6 +109,14 @@ public final class SqliteMetadataProjectionStore {
             throw new DatabaseRecoveryException("Unable to access metadata database for tenant " + tenantId, exception);
         } finally {
             lock.unlock();
+        }
+    }
+
+    private static void checkpoint(Connection connection) {
+        try (var statement = connection.createStatement()) {
+            statement.execute("PRAGMA wal_checkpoint(PASSIVE)");
+        } catch (SQLException ignored) {
+            // A busy checkpoint is benign; the next batch retries.
         }
     }
 
@@ -283,6 +294,18 @@ public final class SqliteMetadataProjectionStore {
         write(tenantId, connection -> {
             try (PreparedStatement statement =
                     connection.prepareStatement("DELETE FROM files; DELETE FROM applied_events")) {
+                statement.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    /** Deletes applied-event ledger rows up to a compacted sequence (space only). */
+    public void pruneAppliedEvents(String tenantId, long throughSequence) {
+        write(tenantId, connection -> {
+            try (PreparedStatement statement =
+                    connection.prepareStatement("DELETE FROM applied_events WHERE sequence_number<=?")) {
+                statement.setLong(1, throughSequence);
                 statement.executeUpdate();
             }
             return null;

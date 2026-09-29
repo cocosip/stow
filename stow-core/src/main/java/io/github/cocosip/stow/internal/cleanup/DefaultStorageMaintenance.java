@@ -18,6 +18,7 @@ import io.github.cocosip.stow.model.DatabaseRebuildResult;
 import io.github.cocosip.stow.model.MaintenanceError;
 import io.github.cocosip.stow.spi.QueueEventJournal;
 import io.github.cocosip.stow.spi.StorageVolume;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
@@ -211,10 +212,12 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
                     List.of(new DatabasePath(metadataRoot, "metadata.db"), new DatabasePath(quotaRoot, "quotas.db"))) {
                 Path path = database.root.resolve(tenantId).resolve(database.fileName);
                 if (!Files.exists(path)) continue;
+                long before = databaseBytes(path);
                 try (var connection = DriverManager.getConnection("jdbc:sqlite:" + path);
                         var statement = connection.createStatement()) {
                     statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
                     statement.execute("VACUUM");
+                    result.released += Math.max(0, before - databaseBytes(path));
                     optimized = true;
                 } catch (Exception exception) {
                     result.failed++;
@@ -252,6 +255,21 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
 
     private record DatabasePath(Path root, String fileName) {}
 
+    private static long databaseBytes(Path database) {
+        long total = 0;
+        for (String suffix : new String[] {"", "-wal", "-shm"}) {
+            Path file = database.resolveSibling(database.getFileName() + suffix);
+            if (Files.exists(file)) {
+                try {
+                    total += Files.size(file);
+                } catch (IOException ignored) {
+                    // Unreadable sidecars contribute nothing to the measurement.
+                }
+            }
+        }
+        return total;
+    }
+
     private static final class OptimizationBuilder {
         private final Instant startedAt;
         private final Clock clock;
@@ -261,6 +279,7 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
         private long optimized;
         private long skipped;
         private long failed;
+        private long released;
 
         private OptimizationBuilder(Clock clock) {
             this.clock = clock;
@@ -275,7 +294,7 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
                     optimized,
                     skipped,
                     failed,
-                    0,
+                    released,
                     tenants.size(),
                     List.copyOf(errors));
         }

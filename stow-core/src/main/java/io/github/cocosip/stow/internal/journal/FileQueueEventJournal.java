@@ -144,6 +144,8 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         synchronized (tenant) {
             ensureOpen(tenant);
             if (offset >= tenant.tailOffset) {
+                // Echo semantics: the record invariant keeps nextOffset monotonic for
+                // every replay loop; callers bound their own lag against tailOffset.
                 return new JournalReadBatch(tenantId, offset, offset, tenant.lastSequence, List.of());
             }
             long logicalStart = Math.max(offset, tenant.baseOffset);
@@ -200,15 +202,15 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         TenantJournalWriter writer;
         long previousBase;
         Path log;
+        long target;
         synchronized (tenant) {
             ensureOpen(tenant);
             if (tenant.compacting) {
                 throw new IllegalStateException("Journal compaction already in progress for tenant " + tenantId);
             }
-            if (throughOffset < tenant.baseOffset || throughOffset > tenant.tailOffset) {
-                throw new IllegalArgumentException("compaction offset is outside journal bounds");
-            }
-            if (throughOffset == tenant.baseOffset) {
+            // Clamp out-of-range offsets instead of rejecting them.
+            target = Math.max(tenant.baseOffset, Math.min(throughOffset, tenant.tailOffset));
+            if (target == tenant.baseOffset) {
                 return;
             }
             writer = tenant.writer;
@@ -227,7 +229,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             synchronized (tenant) {
                 Path temp = tenant.directory.resolve(".queue.log.compact.tmp");
                 try {
-                    copySuffix(log, temp, throughOffset - previousBase);
+                    copySuffix(log, temp, target - previousBase);
                     Files.move(
                             temp,
                             log,
@@ -243,7 +245,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                         // Best effort cleanup.
                     }
                 }
-                tenant.baseOffset = throughOffset;
+                tenant.baseOffset = target;
                 tenant.tailOffset = tenant.baseOffset + FilesSize(log);
                 persistState(tenant, false, -1);
             }
@@ -428,6 +430,11 @@ public final class FileQueueEventJournal implements QueueEventJournal {
                         synchronized (tenant) {
                             tenant.tailOffset = tenant.baseOffset + result.tailOffset();
                             tenant.lastSequence = result.lastSequenceNumber();
+                        }
+                    },
+                    () -> {
+                        // Debounced by the writer; the state file is a rebuildable hint.
+                        synchronized (tenant) {
                             persistState(tenant, false, -1);
                         }
                     });

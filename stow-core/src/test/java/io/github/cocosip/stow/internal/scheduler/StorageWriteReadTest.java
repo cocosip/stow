@@ -5,7 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.cocosip.stow.api.ContentSources;
 import io.github.cocosip.stow.api.IdempotentStoragePool;
-import io.github.cocosip.stow.exception.StoredFileNotFoundException;
+import io.github.cocosip.stow.exception.TenantNotFoundException;
 import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
 import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
 import io.github.cocosip.stow.internal.projection.ActiveFileCache;
@@ -73,8 +73,10 @@ class StorageWriteReadTest {
             assertThat(input.readAllBytes()).containsExactly("hello".getBytes());
         }
         TenantContext other = tenant("tenant-b", TenantStatus.ENABLED, clock);
-        assertThat(pool.findFileInfo(other, fileKey)).isEmpty();
-        assertThatThrownBy(() -> pool.read(other, fileKey)).isInstanceOf(StoredFileNotFoundException.class);
+        // Unknown tenants are rejected up front instead of answering with an empty
+        // lookup, matching the original's per-operation tenant validation.
+        assertThatThrownBy(() -> pool.findFileInfo(other, fileKey)).isInstanceOf(TenantNotFoundException.class);
+        assertThatThrownBy(() -> pool.read(other, fileKey)).isInstanceOf(TenantNotFoundException.class);
         assertThat(quota.tenantCurrentCount("tenant-a")).isEqualTo(1);
         assertThat(pool.totalCapacity()).isEqualTo(10_000);
         assertThat(pool.availableCapacity()).isEqualTo(9_995);

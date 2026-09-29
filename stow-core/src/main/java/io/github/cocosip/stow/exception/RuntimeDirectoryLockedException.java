@@ -2,6 +2,9 @@ package io.github.cocosip.stow.exception;
 
 public final class RuntimeDirectoryLockedException extends StowException {
 
+    @java.io.Serial
+    private static final long serialVersionUID = 1L;
+
     public RuntimeDirectoryLockedException(String message) {
         super("STOW_RUNTIME_DIRECTORY_LOCKED", message);
     }

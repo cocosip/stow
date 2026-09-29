@@ -72,6 +72,9 @@ public final class DatabaseRecoveryService {
             }
             offset = batch.nextOffset();
         }
+        // The metadata-only replay skips quota side effects, so counts are recomputed
+        // from the restored active set once the replay converges.
+        quota.rebuildFromMetadata(tenantId, metadata.activeFiles(tenantId));
         Instant finished = clock.instant();
         return new DatabaseRebuildResult(tenantId, started, finished, scanned, scanned, 0, 0, new ArrayList<>());
     }

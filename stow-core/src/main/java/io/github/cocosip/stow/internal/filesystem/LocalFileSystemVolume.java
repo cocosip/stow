@@ -189,24 +189,45 @@ final class LocalFileSystemVolume implements StorageVolume {
 
     @Override
     public void move(Path source, Path target) {
-        try {
-            Path safeSource = validateTarget(source, false);
-            Path safeTarget = validateTarget(target, true);
-            try (SecureParent sourceParent = openSecureParent(safeSource);
-                    SecureParent targetParent = openSecureParent(safeTarget)) {
-                if (sourceParent != null && targetParent != null) {
-                    sourceParent
-                            .directory()
-                            .move(sourceParent.fileName(), targetParent.directory(), targetParent.fileName());
-                    return;
+        // Windows real-time scanners can make a just-written file briefly unavailable
+        // for an atomic move; retry before giving up because the operation is idempotent
+        // while the source exists and the target does not.
+        java.io.IOException lastFailure = null;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            try {
+                moveOnce(source, target);
+                return;
+            } catch (java.nio.file.NoSuchFileException | java.nio.file.AccessDeniedException exception) {
+                lastFailure = exception;
+                try {
+                    Thread.sleep(10L * (attempt + 1));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new StorageVolumeUnavailableException(
+                            "Interrupted while moving file within storage volume", interrupted);
                 }
+            } catch (IOException exception) {
+                throw unavailable("Unable to move file within storage volume", exception);
             }
-            safeSource = validateTarget(safeSource, false);
-            safeTarget = validateTarget(safeTarget, true);
-            Files.move(safeSource, safeTarget, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException exception) {
-            throw unavailable("Unable to move file within storage volume", exception);
         }
+        throw unavailable("Unable to move file within storage volume", lastFailure);
+    }
+
+    private void moveOnce(Path source, Path target) throws IOException {
+        Path safeSource = validateTarget(source, false);
+        Path safeTarget = validateTarget(target, true);
+        try (SecureParent sourceParent = openSecureParent(safeSource);
+                SecureParent targetParent = openSecureParent(safeTarget)) {
+            if (sourceParent != null && targetParent != null) {
+                sourceParent
+                        .directory()
+                        .move(sourceParent.fileName(), targetParent.directory(), targetParent.fileName());
+                return;
+            }
+        }
+        safeSource = validateTarget(safeSource, false);
+        safeTarget = validateTarget(safeTarget, true);
+        Files.move(safeSource, safeTarget, StandardCopyOption.ATOMIC_MOVE);
     }
 
     @Override
@@ -497,6 +518,9 @@ final class LocalFileSystemVolume implements StorageVolume {
     }
 
     private static final class UnsafeStoragePathException extends IOException {
+
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
 
         private UnsafeStoragePathException(String message) {
             super(message);
