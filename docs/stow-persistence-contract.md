@@ -210,10 +210,12 @@ CREATE TABLE applied_quota_events (
 
 Before a write, one quota transaction checks tenant and directory limits,
 increments counts, and inserts a reservation. The `ACCEPTED` projection
-consumes the reservation without incrementing again. A failure before the
-physical write, or a successful physical deletion, removes the reservation
-and decrements counts. Startup reconciles each reservation against the journal
-and physical file: an established fact consumes it; no fact rolls it back.
+consumes the reservation without incrementing again; the reservation row is
+retained so the release can decrement the originally charged directory. A
+failure before the physical write, or a successful physical deletion or
+dead-lettering, removes the reservation and decrements counts. Startup
+reconciles each reservation against the projected active set: an established
+fact keeps the charge; no fact rolls it back.
 
 `DELETE_SUCCEEDED` and `DEAD_LETTERED` decrement counts only when a file first
 leaves the active set. Each quota event is recorded in
@@ -330,10 +332,12 @@ event, or illegal reverse transition is a conflict.
    counts.
 3. Write a same-directory temporary file, force according to configuration,
    and atomically move it into place.
-4. Append `ACCEPTED`: `DURABLE` waits for force, `BALANCED` waits for write,
-   and `ASYNC` waits only for entry into the bounded queue.
+4. Append `ACCEPTED`: `DURABLE` waits for force, `BALANCED` waits for the
+   write and forces at least once per `balancedFlushWindow` (immediately when
+   the writer has no backlog), and `ASYNC` waits only for entry into the
+   bounded queue.
 5. Update the active cache and enqueue projection work.
-6. Idempotently commit `ACCEPTED` to metadata and quota, remove the
+6. Idempotently commit `ACCEPTED` to metadata and quota, consume the
    reservation, and advance the cursor only after both sides succeed.
 
 Compensation follows the invariant that a physical file must not coexist with
