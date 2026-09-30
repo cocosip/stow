@@ -182,7 +182,9 @@
             <parameters>true</parameters>
             <compilerArgs>
               <!-- -processing: annotation processors are declared explicitly per module -->
+              <!-- -Werror: warnings are build failures, keeping the tree warning-free -->
               <arg>-Xlint:all,-processing</arg>
+              <arg>-Werror</arg>
             </compilerArgs>
           </configuration>
         </plugin>
