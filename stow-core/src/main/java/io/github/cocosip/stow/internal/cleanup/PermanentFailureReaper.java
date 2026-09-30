@@ -92,6 +92,12 @@ public final class PermanentFailureReaper {
                         statistics.skipped();
                         continue;
                     }
+                    if (!volumeHealthy(row.volumeId())) {
+                        // A temporary mount outage must not converge the row while
+                        // its file may simply be unreachable (register C12).
+                        statistics.skipped();
+                        continue;
+                    }
                     try {
                         Path finalLocation = disposition == PermanentlyFailedDisposition.MOVE_TO_DEAD_LETTER
                                 ? moveToDeadLetter(row, volume(row))
@@ -120,6 +126,17 @@ public final class PermanentFailureReaper {
         StorageVolume volume = volumes.get(row.volumeId());
         if (volume == null) throw new IllegalStateException("Unknown storage volume: " + row.volumeId());
         return volume;
+    }
+
+    /** Physical dead-letter/delete only runs against a reachable volume (register C12). */
+    private boolean volumeHealthy(String volumeId) {
+        StorageVolume volume = volumes.get(volumeId);
+        if (volume == null) return false;
+        try {
+            return volume.healthy();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private Path delete(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {

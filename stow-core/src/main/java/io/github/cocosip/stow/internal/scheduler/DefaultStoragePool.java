@@ -364,7 +364,17 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
             // the no-file-without-quota invariant.
             compensation.cleanupBeforePublish();
             if (lastFailure != null) throw lastFailure;
-            throw new InsufficientStorageException("No healthy storage volume is available");
+            // Distinguish the failure causes like Locus: no volume at all vs volumes
+            // that cannot hold this write.
+            boolean anyHealthy = volumes.stream().anyMatch(DefaultStoragePool::healthy);
+            if (!anyHealthy) {
+                throw new InsufficientStorageException("No healthy storage volumes available");
+            }
+            if (knownLength.isPresent() && knownLength.getAsLong() > 0) {
+                throw new InsufficientStorageException(
+                        "No healthy storage volume has enough free space for " + knownLength.getAsLong() + " bytes");
+            }
+            throw new InsufficientStorageException("All storage volumes are full");
         }
 
         QueueEventRecord accepted = new QueueEventRecord(

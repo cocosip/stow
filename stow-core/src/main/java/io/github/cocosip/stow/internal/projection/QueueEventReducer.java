@@ -167,7 +167,8 @@ public final class QueueEventReducer {
                     processing_started_at_ms=NULL, available_at_ms=?, last_event_sequence=?, row_version=row_version+1 WHERE file_key=?
                 """,
                 e.status().ordinal(),
-                Math.max(current.retryCount() + 1, e.retryCount()),
+                // Event-first merge (Locus): the event's retry count is authoritative.
+                e.retryCount(),
                 e.occurredAt().toEpochMilli(),
                 e.errorMessage(),
                 e.status() == FileProcessingStatus.PERMANENTLY_FAILED ? null : millis(e.availableAt(), e.occurredAt()),

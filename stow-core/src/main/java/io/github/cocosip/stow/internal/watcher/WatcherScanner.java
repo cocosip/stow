@@ -83,11 +83,22 @@ public final class WatcherScanner {
     }
 
     public WatcherScanResult scan(WatcherConfiguration configuration) {
+        return scan(configuration, Duration.ZERO);
+    }
+
+    /**
+     * Runs one scan. The global history-flush debounce (watcher options) takes
+     * precedence over the per-watcher flush interval when it is non-zero, making
+     * the option live as the minimum interval between history prune passes.
+     */
+    public WatcherScanResult scan(WatcherConfiguration configuration, Duration globalHistoryFlushDebounce) {
         Objects.requireNonNull(configuration, "configuration");
         Instant started = clock.instant();
         ResultBuilder result = new ResultBuilder(configuration.watcherId(), started);
-        history.prune(
-                configuration.watcherId(), configuration.historyRetention(), configuration.historyFlushInterval());
+        Duration pruneThrottle = globalHistoryFlushDebounce == null || globalHistoryFlushDebounce.isZero()
+                ? configuration.historyFlushInterval()
+                : globalHistoryFlushDebounce;
+        history.prune(configuration.watcherId(), configuration.historyRetention(), pruneThrottle);
         statistics.recordWatcherScan(configuration.watcherId());
         try (Stream<Path> candidates = discover(configuration);
                 ExecutorService executor = Executors.newFixedThreadPool(
@@ -134,6 +145,10 @@ public final class WatcherScanner {
     private Outcome process(WatcherConfiguration configuration, Path source) {
         try {
             StableFile stable = stable(source, configuration);
+            if (stable.size() == 0) {
+                // Locus skips empty files: a 0-byte source is never a valid import.
+                return Outcome.skippedOutcome();
+            }
             SourceFingerprint fingerprint = fingerprint(source);
             TenantContext tenant = resolveTenant(configuration, source);
             if (cleanupEnabled()) {
@@ -168,6 +183,10 @@ public final class WatcherScanner {
         } catch (io.github.cocosip.stow.exception.TenantDisabledException exception) {
             // Disabled tenants are skipped, not failed: importing for them would
             // violate isolation and their files stay for a later re-enable.
+            return Outcome.skippedOutcome();
+        } catch (UnstableSourceException exception) {
+            // A file that changes between stability probes is still being written;
+            // Locus treats this as a skip for the next scan to re-evaluate.
             return Outcome.skippedOutcome();
         } catch (UnknownTenantSourceException exception) {
             // Files outside a tenant directory (or under an unknown one) are not
@@ -254,10 +273,12 @@ public final class WatcherScanner {
                 var next = Files.readAttributes(
                         source, java.nio.file.attribute.BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
                 if (next.size() != size || next.lastModifiedTime().toMillis() != modified) {
-                    throw new IllegalStateException("File is not stable: " + source.getFileName());
+                    throw new UnstableSourceException("File is not stable: " + source.getFileName());
                 }
             }
             return new StableFile(size, modified);
+        } catch (UnstableSourceException exception) {
+            throw exception;
         } catch (IOException exception) {
             throw new IllegalStateException("Unable to inspect source file", exception);
         }
@@ -402,6 +423,17 @@ public final class WatcherScanner {
     }
 
     private record StableFile(long size, long modifiedAtMillis) {}
+
+    /** Marks a source whose bytes changed between stability probes; treated as a skip. */
+    private static final class UnstableSourceException extends RuntimeException {
+
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
+
+        private UnstableSourceException(String message) {
+            super(message);
+        }
+    }
 
     /** Marks a source that has no tenant to import for; treated as a skip, not a failure. */
     private static final class UnknownTenantSourceException extends RuntimeException {

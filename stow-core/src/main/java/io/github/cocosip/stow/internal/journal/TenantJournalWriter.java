@@ -35,6 +35,17 @@ public final class TenantJournalWriter implements AutoCloseable {
     private final AtomicInteger queuedRecords = new AtomicInteger();
     private final Thread worker;
     private volatile Throwable failure;
+    private final java.util.concurrent.atomic.LongAdder appendBatchCount = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder singleRecordAppendBatches =
+            new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder multiRecordAppendBatches =
+            new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder appendedRecordCount =
+            new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder appendedBytes = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder appendNanos = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder flushCount = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder flushNanos = new java.util.concurrent.atomic.LongAdder();
     private long nextOffset;
     private long lastForceNanos;
     private long lastStateFlushNanos = System.nanoTime();
@@ -188,6 +199,7 @@ public final class TenantJournalWriter implements AutoCloseable {
 
     private void write(Batch collected) {
         List<Pending> batch = collected.pendings();
+        long writeStarted = System.nanoTime();
         try {
             boolean wrote = false;
             for (byte[] frame : collected.frames()) {
@@ -199,7 +211,18 @@ public final class TenantJournalWriter implements AutoCloseable {
                 forceAccordingToAckMode();
                 resultConsumer.accept(new WriteResult(nextOffset, lastSequenceOf(batch)));
                 stateDirty = true;
+                appendBatchCount.increment();
+                if (batch.size() == 1 && batch.get(0).events.size() == 1) {
+                    singleRecordAppendBatches.increment();
+                } else {
+                    multiRecordAppendBatches.increment();
+                }
+                appendedRecordCount.add(collected.frames().size());
+                appendedBytes.add(collected.frames().stream()
+                        .mapToLong(frame -> frame.length)
+                        .sum());
             }
+            appendNanos.add(System.nanoTime() - writeStarted);
             // A successful batch clears the previous failure: one bad append must not
             // permanently take the tenant journal down.
             failure = null;
@@ -226,17 +249,35 @@ public final class TenantJournalWriter implements AutoCloseable {
 
     private void forceAccordingToAckMode() throws IOException {
         if (configuration.ackMode() == JournalAckMode.DURABLE) {
+            long flushStarted = System.nanoTime();
             channel.force(true);
+            flushCount.increment();
+            flushNanos.add(System.nanoTime() - flushStarted);
             lastForceNanos = System.nanoTime();
         } else if (configuration.ackMode() == JournalAckMode.BALANCED) {
             // fsync immediately with no backlog and at least once per flush window
             // under load, bounding the durability gap acknowledged events can span.
             long window = configuration.balancedFlushWindow().toNanos();
             if (queue.isEmpty() || System.nanoTime() - lastForceNanos >= window) {
+                long flushStarted = System.nanoTime();
                 channel.force(true);
+                flushCount.increment();
+                flushNanos.add(System.nanoTime() - flushStarted);
                 lastForceNanos = System.nanoTime();
             }
         }
+    }
+
+    /** Aggregates this writer's observed write-path counters into the given builder. */
+    void collectWritePathStatistics(QueueJournalWritePathStatistics.Builder builder) {
+        builder.appendBatchCount(appendBatchCount.sum())
+                .singleRecordAppendBatches(singleRecordAppendBatches.sum())
+                .multiRecordAppendBatches(multiRecordAppendBatches.sum())
+                .appendedRecordCount(appendedRecordCount.sum())
+                .appendedBytes(appendedBytes.sum())
+                .appendNanos(appendNanos.sum())
+                .flushCount(flushCount.sum())
+                .flushNanos(flushNanos.sum());
     }
 
     private void flushStateIfDue() {

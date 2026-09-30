@@ -18,13 +18,12 @@ public final class QueueProjectionService {
     private final QueueEventReducer reducer;
     private final ProjectionCursorStore cursors;
     private final Clock clock;
-    private final ActiveFileCache activeCache;
     private final Consumer<RuntimeException> failureObserver;
     private final Consumer<QueueEventRecord> projectedObserver;
     private final Map<String, Object> tenantLocks = new ConcurrentHashMap<>();
 
     public QueueProjectionService(QueueEventJournal journal, QueueEventReducer reducer, ProjectionCursorStore cursors) {
-        this(journal, reducer, cursors, Clock.systemUTC(), null, ignored -> {}, ignored -> {});
+        this(journal, reducer, cursors, Clock.systemUTC(), ignored -> {}, ignored -> {});
     }
 
     public QueueProjectionService(
@@ -32,18 +31,8 @@ public final class QueueProjectionService {
             QueueEventReducer reducer,
             ProjectionCursorStore cursors,
             Clock clock,
-            ActiveFileCache activeCache) {
-        this(journal, reducer, cursors, clock, activeCache, ignored -> {}, ignored -> {});
-    }
-
-    public QueueProjectionService(
-            QueueEventJournal journal,
-            QueueEventReducer reducer,
-            ProjectionCursorStore cursors,
-            Clock clock,
-            ActiveFileCache activeCache,
             Consumer<RuntimeException> failureObserver) {
-        this(journal, reducer, cursors, clock, activeCache, failureObserver, ignored -> {});
+        this(journal, reducer, cursors, clock, failureObserver, ignored -> {});
     }
 
     public QueueProjectionService(
@@ -51,14 +40,12 @@ public final class QueueProjectionService {
             QueueEventReducer reducer,
             ProjectionCursorStore cursors,
             Clock clock,
-            ActiveFileCache activeCache,
             Consumer<RuntimeException> failureObserver,
             Consumer<QueueEventRecord> projectedObserver) {
         this.journal = journal;
         this.reducer = reducer;
         this.cursors = cursors;
         this.clock = clock;
-        this.activeCache = activeCache;
         this.failureObserver = failureObserver;
         this.projectedObserver = projectedObserver;
     }
@@ -88,7 +75,6 @@ public final class QueueProjectionService {
         }
         cursors.save(new ProjectionCursorStore.Cursor(
                 tenantId, batch.nextOffset(), last.sequenceNumber(), last.eventId(), clock.instant()));
-        if (activeCache != null) activeCache.invalidate(tenantId);
         return true;
     }
 

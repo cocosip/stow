@@ -61,7 +61,6 @@ class LeaseProjectionFailureTest {
                     new QueueEventReducer(metadata, quota),
                     new ProjectionCursorStore(root.resolve("cursor"), clock),
                     clock,
-                    null,
                     observedFailure::set);
             DefaultStoragePool pool = new DefaultStoragePool(
                     ignored -> tenant, quota, metadata, projection, failingJournal, volume, clock);

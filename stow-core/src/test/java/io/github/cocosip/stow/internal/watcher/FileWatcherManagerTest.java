@@ -153,28 +153,31 @@ class FileWatcherManagerTest {
         Path root = Files.createTempDirectory(Path.of("target"), "watcher-schedule-");
         MutableClock clock = new MutableClock(Instant.parse("2026-09-24T00:00:00Z"));
         WatcherScanner scanner = mock(WatcherScanner.class);
-        when(scanner.scan(any())).thenAnswer(invocation -> result(invocation.getArgument(0)));
+        when(scanner.scan(any(), any())).thenAnswer(invocation -> result(invocation.getArgument(0)));
         DefaultFileWatcherManager manager =
                 new DefaultFileWatcherManager(new WatcherConfigurationStore(root), scanner, clock);
         manager.register(configuration(root.resolve("fast"), "fast", "tenant-a", Duration.ofMillis(10)));
         manager.register(configuration(root.resolve("slow"), "slow", "tenant-a", Duration.ofMillis(100)));
         try {
             manager.pollOnce();
-            await().untilAsserted(
-                            () -> verify(scanner).scan(manager.find("fast").orElseThrow()));
-            verify(scanner).scan(manager.find("slow").orElseThrow());
+            await().untilAsserted(() -> verify(scanner)
+                    .scan(org.mockito.ArgumentMatchers.eq(manager.find("fast").orElseThrow()), any()));
+            verify(scanner)
+                    .scan(org.mockito.ArgumentMatchers.eq(manager.find("slow").orElseThrow()), any());
 
             clock.advance(Duration.ofMillis(20));
             manager.pollOnce();
-            await().untilAsserted(() ->
-                    verify(scanner, times(2)).scan(manager.find("fast").orElseThrow()));
-            verify(scanner).scan(manager.find("slow").orElseThrow());
+            await().untilAsserted(() -> verify(scanner, times(2))
+                    .scan(org.mockito.ArgumentMatchers.eq(manager.find("fast").orElseThrow()), any()));
+            verify(scanner)
+                    .scan(org.mockito.ArgumentMatchers.eq(manager.find("slow").orElseThrow()), any());
 
             clock.advance(Duration.ofMillis(80));
             manager.pollOnce();
-            await().untilAsserted(() ->
-                    verify(scanner, times(3)).scan(manager.find("fast").orElseThrow()));
-            verify(scanner, times(2)).scan(manager.find("slow").orElseThrow());
+            await().untilAsserted(() -> verify(scanner, times(3))
+                    .scan(org.mockito.ArgumentMatchers.eq(manager.find("fast").orElseThrow()), any()));
+            verify(scanner, times(2))
+                    .scan(org.mockito.ArgumentMatchers.eq(manager.find("slow").orElseThrow()), any());
         } finally {
             manager.close();
         }
@@ -184,14 +187,14 @@ class FileWatcherManagerTest {
     void backgroundCoordinatorWakesForWatcherIntervalRatherThanGlobalInterval() throws Exception {
         Path root = Files.createTempDirectory(Path.of("target"), "watcher-background-interval-");
         WatcherScanner scanner = mock(WatcherScanner.class);
-        when(scanner.scan(any())).thenAnswer(invocation -> result(invocation.getArgument(0)));
+        when(scanner.scan(any(), any())).thenAnswer(invocation -> result(invocation.getArgument(0)));
         DefaultFileWatcherManager manager =
                 new DefaultFileWatcherManager(new WatcherConfigurationStore(root), scanner, Clock.systemUTC());
         manager.register(configuration(root.resolve("fast"), "fast", "tenant-a", Duration.ofMillis(20)));
         try {
             manager.start();
             await().atMost(Duration.ofSeconds(1))
-                    .untilAsserted(() -> verify(scanner, atLeast(2)).scan(any()));
+                    .untilAsserted(() -> verify(scanner, atLeast(2)).scan(any(), any()));
         } finally {
             manager.close();
         }
@@ -203,7 +206,7 @@ class FileWatcherManagerTest {
         WatcherScanner scanner = mock(WatcherScanner.class);
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(scanner.scan(any())).thenAnswer(invocation -> {
+        when(scanner.scan(any(), any())).thenAnswer(invocation -> {
             started.countDown();
             assertThat(release.await(2, TimeUnit.SECONDS)).isTrue();
             return result(invocation.getArgument(0));
@@ -217,10 +220,10 @@ class FileWatcherManagerTest {
             var manual = calls.submit(() -> manager.scanNow("watcher-a"));
 
             Thread.sleep(50);
-            verify(scanner).scan(any());
+            verify(scanner).scan(any(), any());
             release.countDown();
             manual.get(1, TimeUnit.SECONDS);
-            verify(scanner).scan(any());
+            verify(scanner).scan(any(), any());
         } finally {
             manager.close();
         }
@@ -234,7 +237,7 @@ class FileWatcherManagerTest {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger active = new AtomicInteger();
         AtomicInteger maximum = new AtomicInteger();
-        when(scanner.scan(any())).thenAnswer(invocation -> {
+        when(scanner.scan(any(), any())).thenAnswer(invocation -> {
             int current = active.incrementAndGet();
             maximum.accumulateAndGet(current, Math::max);
             twoStarted.countDown();
@@ -265,7 +268,7 @@ class FileWatcherManagerTest {
         WatcherScanner scanner = mock(WatcherScanner.class);
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(scanner.scan(any())).thenAnswer(invocation -> {
+        when(scanner.scan(any(), any())).thenAnswer(invocation -> {
             started.countDown();
             assertThat(release.await(2, TimeUnit.SECONDS)).isTrue();
             return result(invocation.getArgument(0));

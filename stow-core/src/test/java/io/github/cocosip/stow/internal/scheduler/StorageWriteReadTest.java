@@ -8,7 +8,6 @@ import io.github.cocosip.stow.api.IdempotentStoragePool;
 import io.github.cocosip.stow.exception.TenantNotFoundException;
 import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
 import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
-import io.github.cocosip.stow.internal.projection.ActiveFileCache;
 import io.github.cocosip.stow.internal.projection.ProjectionCursorStore;
 import io.github.cocosip.stow.internal.projection.QueueEventReducer;
 import io.github.cocosip.stow.internal.projection.QueueProjectionService;
@@ -51,9 +50,7 @@ class StorageWriteReadTest {
         QueueProjectionService projection = new QueueProjectionService(
                 journal,
                 new QueueEventReducer(metadata, quota),
-                new ProjectionCursorStore(root.resolve("cursor"), clock),
-                clock,
-                new ActiveFileCache(metadata));
+                new ProjectionCursorStore(root.resolve("cursor"), clock));
         TestVolume volume = new TestVolume("volume-a", root.resolve("volume"));
         DefaultStoragePool pool =
                 new DefaultStoragePool(tenantManager(tenant), quota, metadata, projection, journal, volume, clock);
@@ -120,9 +117,7 @@ class StorageWriteReadTest {
         QueueProjectionService projection = new QueueProjectionService(
                 journal,
                 new QueueEventReducer(metadata, quota),
-                new ProjectionCursorStore(root.resolve("cursor"), clock),
-                clock,
-                new ActiveFileCache(metadata));
+                new ProjectionCursorStore(root.resolve("cursor"), clock));
         TestVolume volume = new TestVolume("volume-a", root.resolve("volume"));
         IdempotentStoragePool pool =
                 new DefaultStoragePool(tenantManager(tenant), quota, metadata, projection, journal, volume, clock);

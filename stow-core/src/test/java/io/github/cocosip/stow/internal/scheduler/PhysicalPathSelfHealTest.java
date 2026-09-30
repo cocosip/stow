@@ -7,7 +7,6 @@ import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.exception.StoredFileNotFoundException;
 import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
 import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
-import io.github.cocosip.stow.internal.projection.ActiveFileCache;
 import io.github.cocosip.stow.internal.projection.ProjectionCursorStore;
 import io.github.cocosip.stow.internal.projection.QueueEventReducer;
 import io.github.cocosip.stow.internal.projection.QueueProjectionService;
@@ -82,9 +81,7 @@ class PhysicalPathSelfHealTest {
             QueueProjectionService projection = new QueueProjectionService(
                     journal,
                     new QueueEventReducer(metadata, quota),
-                    new ProjectionCursorStore(root.resolve("cursor"), clock),
-                    clock,
-                    new ActiveFileCache(metadata));
+                    new ProjectionCursorStore(root.resolve("cursor"), clock));
             pool = new DefaultStoragePool(id -> tenant, quota, metadata, projection, journal, volume, clock);
         }
 

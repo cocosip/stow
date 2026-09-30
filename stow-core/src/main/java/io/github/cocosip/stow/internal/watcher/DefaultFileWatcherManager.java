@@ -325,7 +325,7 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
         try {
             admitted = acquireScan(background);
             if (!admitted) throw new IllegalStateException("File watcher scan admission is closed");
-            WatcherScanResult result = scanner.scan(configuration);
+            WatcherScanResult result = scanner.scan(configuration, options.get().historyFlushDebounce());
             scanObserver.accept(result);
             current.complete(result);
             return result;

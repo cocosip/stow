@@ -29,7 +29,7 @@ public final class WatcherConfigurationStore {
     private static final int CONFIGURATION_SCHEMA_VERSION = 2;
     private static final int ROOT_SCHEMA_VERSION = 2;
     private static final WatcherOptions DEFAULT_OPTIONS =
-            new WatcherOptions(true, 1, Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ofDays(30));
+            new WatcherOptions(true, 4, Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ofDays(30));
 
     private final Path directory;
     private final Path configurations;

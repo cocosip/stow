@@ -22,7 +22,6 @@ import io.github.cocosip.stow.internal.journal.BinaryV1JournalCodec;
 import io.github.cocosip.stow.internal.journal.FileQueueEventJournal;
 import io.github.cocosip.stow.internal.journal.JsonLinesJournalCodec;
 import io.github.cocosip.stow.internal.journal.SequencedJournalAppender;
-import io.github.cocosip.stow.internal.projection.ActiveFileCache;
 import io.github.cocosip.stow.internal.projection.ProjectionCursorStore;
 import io.github.cocosip.stow.internal.projection.ProjectionMaintenanceService;
 import io.github.cocosip.stow.internal.projection.ProjectionSnapshotStore;
@@ -269,7 +268,63 @@ public final class DefaultStowRuntime implements StowRuntime {
                 runtimeHealth.update(component, HealthStatus.DOWN, message(failure));
             }
         }
+        updateJournalHealth();
+        updateSqliteHealth();
         return runtimeHealth.snapshot(state.get());
+    }
+
+    /**
+     * The journal component reports the tenant-level state: a tenant latched DOWN by
+     * mid-file corruption or a dead writer marks the component DOWN (register W18).
+     */
+    private void updateJournalHealth() {
+        if (eventJournal == null) return;
+        long downTenants = 0;
+        long totalTenants = 0;
+        String detail = null;
+        for (String tenantId : eventJournal.tenantIds().stream().sorted().toList()) {
+            totalTenants++;
+            try {
+                eventJournal.readBatch(tenantId, eventJournal.tailOffset(tenantId), 1);
+            } catch (RuntimeException failure) {
+                downTenants++;
+                detail = tenantId + ": " + message(failure);
+            }
+        }
+        if (totalTenants == 0) {
+            runtimeHealth.update("journal", HealthStatus.UP, "no tenant journals");
+        } else if (downTenants == 0) {
+            runtimeHealth.update("journal", HealthStatus.UP, totalTenants + " tenants up");
+        } else {
+            runtimeHealth.update(
+                    "journal",
+                    HealthStatus.DOWN,
+                    downTenants + "/" + totalTenants + " tenants down" + (detail == null ? "" : "; last: " + detail));
+        }
+    }
+
+    /** The sqlite component aggregates the database quick-check report (register W18). */
+    private void updateSqliteHealth() {
+        if (storageMaintenanceService == null) return;
+        try {
+            io.github.cocosip.stow.model.DatabaseHealthReport report = storageMaintenanceService.checkDatabases();
+            long down = report.databases().values().stream()
+                    .filter(component -> component.status() == HealthStatus.DOWN)
+                    .count();
+            long degraded = report.databases().values().stream()
+                    .filter(component -> component.status() == HealthStatus.DEGRADED)
+                    .count();
+            if (down > 0) {
+                runtimeHealth.update("sqlite", HealthStatus.DOWN, down + " database(s) failed quick_check");
+            } else if (degraded > 0) {
+                runtimeHealth.update("sqlite", HealthStatus.DEGRADED, degraded + " database(s) busy or locked");
+            } else {
+                runtimeHealth.update(
+                        "sqlite", HealthStatus.UP, report.databases().size() + " database(s) ok");
+            }
+        } catch (RuntimeException failure) {
+            runtimeHealth.update("sqlite", HealthStatus.DOWN, message(failure));
+        }
     }
 
     Optional<StorageVolumeProvider> storageVolumeProvider() {
@@ -359,7 +414,6 @@ public final class DefaultStowRuntime implements StowRuntime {
                 new ProjectionCursorStore(configuration.paths().metadataDirectory(), clock);
         ProjectionSnapshotStore snapshots =
                 new ProjectionSnapshotStore(configuration.paths().metadataDirectory());
-        ActiveFileCache activeCache = new ActiveFileCache(metadataProjection);
         TerminalLeaseIndex terminalLeases = new TerminalLeaseIndex();
         rebuildTerminalLeaseIndex(terminalLeases);
         projectionService = new QueueProjectionService(
@@ -367,7 +421,6 @@ public final class DefaultStowRuntime implements StowRuntime {
                 reducer,
                 cursors,
                 clock,
-                activeCache,
                 failure -> runtimeHealth.update("projection", HealthStatus.DEGRADED, message(failure)),
                 terminalLeases::record);
         projectionMaintenanceService = new ProjectionMaintenanceService(

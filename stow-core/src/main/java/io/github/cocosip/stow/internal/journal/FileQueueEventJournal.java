@@ -27,6 +27,12 @@ public final class FileQueueEventJournal implements QueueEventJournal {
     private final JournalConfiguration configuration;
     private final JournalCodec codec;
     private final Map<String, TenantLog> tenants = new ConcurrentHashMap<>();
+    private final QueueJournalWritePathStatistics.Builder writePathStatistics =
+            new QueueJournalWritePathStatistics.Builder();
+    private final java.util.concurrent.atomic.AtomicLong corruptTailsDetected =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong corruptTailsRepaired =
+            new java.util.concurrent.atomic.AtomicLong();
     private volatile boolean closed;
 
     public FileQueueEventJournal(Path queueDirectory, JournalConfiguration configuration, JournalCodec codec) {
@@ -148,6 +154,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         }
         // A prefix ending at a corrupt frame is still returned: the events before the
         // corruption are valid facts and applied_events makes replaying them safe.
+        if (batch.corruptTail()) corruptTailsDetected.incrementAndGet();
         if (!batch.corruptTail() || !batch.events().isEmpty()) {
             return batch;
         }
@@ -223,6 +230,7 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         try {
             JournalScanner.Result scan =
                     new JournalScanner().scan(tenant.directory.resolve("queue.log"), tenant.codec, true);
+            if (scan.repaired()) corruptTailsRepaired.incrementAndGet();
             tenant.tailOffset = tenant.baseOffset + scan.physicalLength();
             tenant.lastSequence = scan.lastSequenceNumber();
             tenant.admittedSequence = Math.min(tenant.admittedSequence, scan.lastSequenceNumber());
@@ -246,6 +254,31 @@ public final class FileQueueEventJournal implements QueueEventJournal {
         synchronized (tenant) {
             return tenant.baseOffset;
         }
+    }
+
+    /** Locus IQueueEventJournalWritePathDiagnostics: observed write-path counters. */
+    public QueueJournalWritePathStatistics writePathStatistics() {
+        QueueJournalWritePathStatistics.Builder snapshot = new QueueJournalWritePathStatistics.Builder();
+        for (TenantLog tenant : tenants.values()) {
+            TenantJournalWriter writer;
+            synchronized (tenant) {
+                writer = tenant.writer;
+            }
+            if (writer != null) writer.collectWritePathStatistics(snapshot);
+        }
+        QueueJournalWritePathStatistics writerLevel = snapshot.build();
+        QueueJournalWritePathStatistics journalLevel = writePathStatistics.build();
+        return new QueueJournalWritePathStatistics(
+                writerLevel.appendBatchCount() + journalLevel.appendBatchCount(),
+                writerLevel.singleRecordAppendBatches() + journalLevel.singleRecordAppendBatches(),
+                writerLevel.multiRecordAppendBatches() + journalLevel.multiRecordAppendBatches(),
+                writerLevel.appendedRecordCount() + journalLevel.appendedRecordCount(),
+                writerLevel.appendedBytes() + journalLevel.appendedBytes(),
+                writerLevel.appendNanos() + journalLevel.appendNanos(),
+                writerLevel.flushCount() + journalLevel.flushCount(),
+                writerLevel.flushNanos() + journalLevel.flushNanos(),
+                corruptTailsDetected.get(),
+                corruptTailsRepaired.get());
     }
 
     @Override

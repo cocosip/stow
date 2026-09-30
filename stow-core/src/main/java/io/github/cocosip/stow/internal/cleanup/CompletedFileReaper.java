@@ -100,6 +100,12 @@ public final class CompletedFileReaper {
                 for (SqliteMetadataProjectionStore.FileRow row : toDelete) {
                     statistics.scanned();
                     statistics.tenant(tenantId);
+                    if (!volumeHealthy(row.volumeId())) {
+                        // A temporary mount outage must not produce a false
+                        // DELETE_SUCCEEDED; the row waits for a healthy cycle.
+                        statistics.skipped();
+                        continue;
+                    }
                     try {
                         delete(row);
                         statistics.succeeded(tenantId, row.fileSize());
@@ -115,6 +121,17 @@ public final class CompletedFileReaper {
     private void requestDelete(SqliteMetadataProjectionStore.FileRow row) {
         appender.append(event(row, QueueEventType.DELETE_REQUESTED, FileProcessingStatus.DELETE_REQUESTED));
         project(row.tenantId());
+    }
+
+    /** Physical deletion only runs against a reachable volume (register C12). */
+    private boolean volumeHealthy(String volumeId) {
+        StorageVolume volume = volumes.get(volumeId);
+        if (volume == null) return false;
+        try {
+            return volume.healthy();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private void delete(SqliteMetadataProjectionStore.FileRow row) {
