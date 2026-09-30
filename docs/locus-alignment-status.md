@@ -29,12 +29,12 @@ or remaining work. It complements the design baseline in `stow-design.md`
 
 | Status | Count | Meaning |
 | --- | --- | --- |
-| FIXED | 74 | Implemented and covered by tests; `mvn clean verify` green |
+| FIXED | 75 | Implemented and covered by tests; `mvn clean verify` green |
 | INTENTIONAL | 20 | stow's contract deliberately chooses stricter or different behavior; do not change without a contract revision (§5) |
-| OPEN | 1 | Real gap against Locus queued for a future iteration (§6) |
+| OPEN | 0 | Nothing queued: every finding is resolved or an intentional deviation |
 
 All 10 P0 and all 45 P1 findings are resolved (2 former P1s are
-INTENTIONAL). One P2 remains open.
+INTENTIONAL). The register is closed.
 
 Status legend used below: **FIXED**, **PARTIAL**, **INTENTIONAL** (§5),
 **OPEN** (§6). Priority is the original audit priority (P0 blocker, P1
@@ -137,7 +137,7 @@ semantic/capability, P2 minor).
 | C13 | P2 | Dead-letter layout/options not configurable; no `PurgeMetadataOnly` disposition | FIXED — `PURGE_METADATA_ONLY` disposition converges permanent-failure rows to DEAD_LETTERED and releases quota without touching the physical file (Locus PurgeMetadataOnly); it also does not require a healthy volume |
 | C14 | P2 | Orphan recovery fidelity: name pattern gating, `/` logical directory, no tenant-status gating | FIXED — orphan recovery only adopts files for existing, enabled tenants (tenant-status gate threaded from the runtime); name-pattern gating and the `/` logical directory were already in place |
 | C15 | P2 | Import pre-checks missing (0-byte skip, exclusive-open skip, unstable = skipped) | FIXED — imports skip 0-byte sources and treat an unstable file between stability probes as a skip for the next scan rather than a failure |
-| C16 | P2 | Legacy watcher path lacks post-import retry caps, backoff, quarantine | OPEN (P2) |
+| C16 | P2 | Legacy watcher path lacks post-import retry caps, backoff, quarantine | FIXED — the legacy import path now has the same protections as the durable one: failed post-import actions back off exponentially up to the configured maximum, stop after `maxPostImportActionAttempts`, and quarantine the source into `<failureDirectory>/<watcherId>/`; a failed quarantine move still marks the source terminal |
 | C17 | P2 | Watcher registration validation gaps (overlap, tenant existence) | FIXED — watcher registration validates that a single-tenant watcher's tenant exists and that no existing watcher already watches the same directory |
 | C18 | P2 | Options defaults (`maxParallelScans` 1 vs 4), no interval clamp, `historyFlushDebounce` dead knob | FIXED — `maxParallelScans` defaults to 4, the scan interval clamps to the Locus bounds [5 s, 1 h], and the global `historyFlushDebounce` knob is live as the history-prune throttle |
 | C19 | P2 | Retired-volume handling dead code; no `PurgeMetadataOnly` disposition | FIXED — retired volumes use the Locus disposition model (`KEEP` / purge-metadata-only): the rewired cleaner removes projected rows pointing at retired volumes and releases quota without touching physical storage, exposed via `StorageMaintenance.cleanupRetiredVolumes` |
@@ -183,17 +183,13 @@ Open P1 items, ordered by expected production impact:
 
 ## 6. Remaining Work (backlog)
 
-Every P0 and P1 finding is resolved. The register is closed for the
-alignment review; the remaining intentional deviations are enumerated in
-§5.
-
-Open P2 item: C16 — the legacy (non-durable) watcher import path lacks
-post-import retry caps, backoff, and quarantine; the durable source-
-cleanup path, which is the default, already has all three.
+None. Every one of the 95 findings is either FIXED or an INTENTIONAL
+deviation enumerated in §5. Future behavior changes to the intentional
+deviations require a contract revision.
 
 ## 7. Verification
 
-- `mvn clean verify`: BUILD SUCCESS — 284 core tests (5 symlink-assumption
+- `mvn clean verify`: BUILD SUCCESS — 285 core tests (5 symlink-assumption
   skips on Windows), 16 starter tests, 2 integration tests, spotless and
   spotbugs gates, zero compiler warnings under `-Xlint:all`.
 - Second-batch regression tests cover: corrupt-tail prefix reads with tail
@@ -211,6 +207,8 @@ cleanup path, which is the default, already has all three.
   `WatcherScannerTest`, `StorageMaintenanceTest`,
   `FileQueueEventJournalTest`, `DefaultStowRuntimeTest`).
 - Fifth batch: retired-volume purge semantics (`RetiredVolumeCleanerTest`).
+- Sixth batch: legacy-path retry cap, backoff, and quarantine
+  (`WatcherScannerTest.legacyActionRetriesWithBackoffThenQuarantines`).
 - Earlier regression tests cover: late-completion recovery, empty-claim
   inline reclaim, statistics dimension retention, quota reservation
   reconciliation, `forceReserve`, missing-permanent-failure convergence,
