@@ -115,6 +115,40 @@ public final class ImportedFileHistory {
         recordImported(watcherId, fingerprint, fileKey, true);
     }
 
+    /** Records a failed post-import action attempt with its next due time (legacy path). */
+    public void recordActionRetry(String watcherId, HistoryEntry previous, int attempts, Instant nextActionAttemptAt) {
+        append(
+                watcherId,
+                new HistoryEntry(
+                        previous.sourcePath(),
+                        previous.size(),
+                        previous.modifiedAtMillis(),
+                        previous.fileKey(),
+                        false,
+                        clock.instant(),
+                        previous.fingerprint(),
+                        attempts,
+                        nextActionAttemptAt,
+                        false));
+    }
+
+    /** Marks a source terminal after its retry budget was exhausted (legacy path). */
+    public void recordQuarantined(String watcherId, HistoryEntry previous) {
+        append(
+                watcherId,
+                new HistoryEntry(
+                        previous.sourcePath(),
+                        previous.size(),
+                        previous.modifiedAtMillis(),
+                        previous.fileKey(),
+                        false,
+                        clock.instant(),
+                        previous.fingerprint(),
+                        previous.attempts(),
+                        null,
+                        true));
+    }
+
     public void prune(String watcherId, Duration retention) {
         prune(watcherId, retention, Duration.ZERO);
     }
@@ -279,7 +313,10 @@ public final class ImportedFileHistory {
             String fileKey,
             boolean actionCompleted,
             Instant recordedAt,
-            SourceFingerprint fingerprint) {
+            SourceFingerprint fingerprint,
+            Integer actionAttempts,
+            Instant nextActionAttemptAt,
+            Boolean quarantined) {
 
         public HistoryEntry(
                 String sourcePath,
@@ -288,7 +325,28 @@ public final class ImportedFileHistory {
                 String fileKey,
                 boolean actionCompleted,
                 Instant recordedAt) {
-            this(sourcePath, size, modifiedAtMillis, fileKey, actionCompleted, recordedAt, null);
+            this(sourcePath, size, modifiedAtMillis, fileKey, actionCompleted, recordedAt, null, null, null, null);
+        }
+
+        public HistoryEntry(
+                String sourcePath,
+                long size,
+                long modifiedAtMillis,
+                String fileKey,
+                boolean actionCompleted,
+                Instant recordedAt,
+                SourceFingerprint fingerprint) {
+            this(
+                    sourcePath,
+                    size,
+                    modifiedAtMillis,
+                    fileKey,
+                    actionCompleted,
+                    recordedAt,
+                    fingerprint,
+                    null,
+                    null,
+                    null);
         }
 
         public HistoryEntry {
@@ -297,6 +355,15 @@ public final class ImportedFileHistory {
                 throw new IllegalArgumentException("history values must be non-negative");
             Objects.requireNonNull(fileKey, "fileKey");
             Objects.requireNonNull(recordedAt, "recordedAt");
+        }
+
+        /** Retry state is absent on entries written before the legacy retry cap existed. */
+        public int attempts() {
+            return actionAttempts == null ? 0 : actionAttempts;
+        }
+
+        public boolean isQuarantined() {
+            return quarantined != null && quarantined;
         }
     }
 }

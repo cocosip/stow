@@ -158,7 +158,19 @@ public final class WatcherScanner {
             if (previous.isPresent()) {
                 ImportedFileHistory.HistoryEntry entry = previous.orElseThrow();
                 if (entry.actionCompleted()) return Outcome.skippedOutcome();
-                applyAction(configuration, source, fingerprint);
+                if (entry.isQuarantined()) {
+                    // Terminal after the retry budget was exhausted (register C16).
+                    return Outcome.quarantinedOutcome();
+                }
+                if (entry.nextActionAttemptAt() != null && clock.instant().isBefore(entry.nextActionAttemptAt())) {
+                    // Backoff window between post-import action retries.
+                    return Outcome.skippedOutcome();
+                }
+                try {
+                    applyAction(configuration, source, fingerprint);
+                } catch (RuntimeException actionFailure) {
+                    return recordActionFailure(configuration, source, fingerprint, entry, actionFailure);
+                }
                 history.recordActionCompleted(configuration.watcherId(), fingerprint, entry.fileKey());
                 return Outcome.retriedOutcome();
             }
@@ -260,6 +272,54 @@ public final class WatcherScanner {
 
     private boolean idempotentWrite() {
         return storagePool instanceof IdempotentStoragePool;
+    }
+
+    /**
+     * Legacy-path post-import failure handling (register C16): exponential backoff
+     * capped at the configured maximum, a retry budget, and quarantine into the
+     * failure directory once the budget is exhausted. A failed quarantine move still
+     * marks the source terminal, like Locus.
+     */
+    private Outcome recordActionFailure(
+            WatcherConfiguration configuration,
+            Path source,
+            SourceFingerprint fingerprint,
+            ImportedFileHistory.HistoryEntry entry,
+            RuntimeException actionFailure) {
+        int attempts = entry.attempts() + 1;
+        if (attempts >= configuration.maxPostImportActionAttempts()) {
+            quarantine(configuration, source, fingerprint);
+            history.recordQuarantined(configuration.watcherId(), entry);
+            return Outcome.quarantinedOutcome();
+        }
+        long backoffMillis = configuration
+                .postImportRetryInitialDelay()
+                .multipliedBy(1L << Math.min(attempts - 1, 16))
+                .toMillis();
+        if (backoffMillis < 0
+                || backoffMillis > configuration.postImportRetryMaxDelay().toMillis()) {
+            backoffMillis = configuration.postImportRetryMaxDelay().toMillis();
+        }
+        history.recordActionRetry(
+                configuration.watcherId(), entry, attempts, clock.instant().plusMillis(backoffMillis));
+        return Outcome.failedOutcome(tenantForError(configuration), "post-action", actionFailure);
+    }
+
+    private void quarantine(WatcherConfiguration configuration, Path source, SourceFingerprint fingerprint) {
+        Path failureDirectory = configuration.sourceCleanupFailureDirectory();
+        if (failureDirectory == null || source.getFileName() == null) return;
+        Path target = failureDirectory.resolve(configuration.watcherId()).resolve(source.getFileName());
+        try {
+            Path targetParent = target.getParent();
+            if (targetParent == null) return;
+            Files.createDirectories(targetParent);
+            // Fingerprint-guarded move: if the source changed after the failed action,
+            // the mismatch leaves it in place and the terminal flag alone stops retries.
+            relocator.moveIfMatching(source, target, fingerprint);
+        } catch (IOException | RuntimeException ignored) {
+            // A failed quarantine becomes terminal via the history flag; the next
+            // scan will not retry the action either way.
+        }
     }
 
     private StableFile stable(Path source, WatcherConfiguration configuration) {
@@ -490,6 +550,10 @@ public final class WatcherScanner {
 
         static Outcome deferredOutcome() {
             return new Outcome(0, 1, 0, 0, 0, 0, 1, null);
+        }
+
+        static Outcome quarantinedOutcome() {
+            return new Outcome(0, 1, 0, 0, 0, 1, 0, null);
         }
 
         static Outcome failedOutcome(String tenantId, String operation, Throwable exception) {

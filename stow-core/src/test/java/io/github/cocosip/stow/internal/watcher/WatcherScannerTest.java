@@ -31,6 +31,8 @@ import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -346,6 +348,109 @@ class WatcherScannerTest {
                 job.createdAt(),
                 job.updatedAt(),
                 job.leaseUntil());
+    }
+
+    @Test
+    void legacyActionRetriesWithBackoffThenQuarantines() throws Exception {
+        Path root = Files.createTempDirectory(Path.of("target"), "watcher-legacy-retry-");
+        Path input = root.resolve("input");
+        Files.createDirectories(input);
+        Path source = input.resolve("a.dcm");
+        Files.writeString(source, "data");
+        // A regular file where a move directory is expected makes every MOVE fail.
+        Path blocker = root.resolve("blocker");
+        Files.writeString(blocker, "not a directory");
+        StoragePool pool = mock(StoragePool.class);
+        when(pool.write(any(TenantContext.class), any(ContentSource.class), any()))
+                .thenReturn("0123456789abcdef0123456789abcdef");
+        TenantManager tenants = mock(TenantManager.class);
+        when(tenants.find("tenant-a")).thenReturn(Optional.of(context("tenant-a")));
+        ImportedFileHistory history = new ImportedFileHistory(root.resolve("history"), CLOCK);
+        // A clock in the future keeps freshly written sources eligible under minimumFileAge.
+        MutableClock clock = new MutableClock(Instant.parse("2099-01-01T00:00:00Z"));
+        WatcherScanner clockedScanner = new WatcherScanner(pool, tenants, history, clock);
+        Path failureDirectory = root.resolve("failed");
+        WatcherConfiguration configuration = new WatcherConfiguration(
+                "watcher-a",
+                "tenant-a",
+                WatcherTenantMode.SINGLE_TENANT,
+                false,
+                input,
+                true,
+                false,
+                List.of("**/*.dcm"),
+                PostImportAction.MOVE,
+                blocker,
+                Duration.ZERO,
+                0,
+                Duration.ZERO,
+                Duration.ZERO,
+                1,
+                2,
+                Duration.ofDays(1),
+                Duration.ZERO,
+                failureDirectory,
+                5,
+                Duration.ofSeconds(5),
+                Duration.ofMinutes(5));
+
+        // Import succeeds; the immediate post-import MOVE fails (imported + failed).
+        WatcherScanResult first = clockedScanner.scan(configuration);
+        assertThat(first.importedCount()).isEqualTo(1);
+        assertThat(first.failedCount()).isEqualTo(1);
+        assertThat(source).exists();
+
+        // Retry 1 is due immediately, fails, and arms a 5 s backoff.
+        WatcherScanResult second = clockedScanner.scan(configuration);
+        assertThat(second.failedCount()).isEqualTo(1);
+        assertThat(source).exists();
+
+        // Inside the backoff window the source is skipped, not failed again.
+        WatcherScanResult skipped = clockedScanner.scan(configuration);
+        assertThat(skipped.skippedCount()).isGreaterThanOrEqualTo(1);
+
+        // Exhaust the remaining budget (4 more due attempts reach the cap of 5).
+        for (int index = 0; index < 4; index++) {
+            clock.advance(Duration.ofMinutes(6));
+            clockedScanner.scan(configuration);
+        }
+        Path quarantined = failureDirectory.resolve("watcher-a").resolve("a.dcm");
+        assertThat(quarantined).exists();
+        assertThat(source).doesNotExist();
+
+        // The terminal flag survives: the quarantined fingerprint is not retried.
+        assertThat(history.read("watcher-a").stream()
+                        .filter(entry -> entry.isQuarantined())
+                        .count())
+                .isEqualTo(1);
+    }
+
+    private static final class MutableClock extends Clock {
+
+        private volatile Instant instant;
+
+        private MutableClock(Instant instant) {
+            this.instant = instant;
+        }
+
+        private void advance(Duration duration) {
+            instant = instant.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
     }
 
     private static WatcherConfiguration configuration(
