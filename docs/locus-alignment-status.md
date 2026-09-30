@@ -29,12 +29,12 @@ or remaining work. It complements the design baseline in `stow-design.md`
 
 | Status | Count | Meaning |
 | --- | --- | --- |
-| FIXED | 40 | Implemented and covered by tests; `mvn clean verify` green |
-| PARTIAL | 5 | One aspect fixed, a secondary aspect remains (see row) |
+| FIXED | 50 | Implemented and covered by tests; `mvn clean verify` green |
+| PARTIAL | 4 | One aspect fixed, a secondary aspect remains (see row) |
 | INTENTIONAL | 16 | stow's contract deliberately chooses stricter or different behavior; do not change without a contract revision (§5) |
-| OPEN | 34 | Real gaps against Locus queued for future iterations (§6) |
+| OPEN | 25 | Real gaps against Locus queued for future iterations (§6) |
 
-All 10 P0 findings are FIXED. Open items: 13 P1 and 21 P2.
+All 10 P0 findings are FIXED. Open items: 7 P1 and 18 P2.
 
 Status legend used below: **FIXED**, **PARTIAL**, **INTENTIONAL** (§5),
 **OPEN** (§6). Priority is the original audit priority (P0 blocker, P1
@@ -47,7 +47,7 @@ semantic/capability, P2 minor).
 | # | P | Finding | Status |
 |---|---|---------|--------|
 | J1 | P0 | BALANCED ack never fsynced; `balancedFlushWindow` was dead config, so acknowledged events could be lost across the whole process lifetime | FIXED — forces immediately with no backlog and at least once per window; knob is live |
-| J2 | P1 | Read-batch corruption throws instead of returning the valid prefix with corrupt-tail normalization (Locus `ReadBatchAsync` + `NormalizeReadOffset`); `JournalScanner` repair decisions sniff exception message text | OPEN (P1) — rework tail handling together with the message-sniffing refactor; strictness itself is contract-sanctioned |
+| J2 | P1 | Read-batch corruption throws instead of returning the valid prefix with corrupt-tail normalization (Locus `ReadBatchAsync` + `NormalizeReadOffset`); `JournalScanner` repair decisions sniff exception message text | FIXED — read batches return the valid prefix with a corrupt-tail flag, repair decisions key on typed corruption reasons (structure/CRC/sequence/schema), an empty prefix at a corrupt frame triggers tail repair, and misaligned offsets normalize to the nearest verified frame; mid-file corruption still latches DOWN |
 | J3 | P1 | Tenant journal writer was permanently dead after the first write failure | FIXED — a successful batch clears the stored failure; only a dead worker thread rejects appends |
 | J4 | P1 | Sequence gaps latch the tenant DOWN instead of Locus's detect → metrics → orphan-recovery self-heal | INTENTIONAL (persistence §7 documents DOWN) — revisit only with a contract revision |
 | J5 | P1 | Mid-file corruption is not truncated-and-continued; final-frame repair sniffs message text | INTENTIONAL for the strictness (see J2 for the repair-decision refactor) |
@@ -70,7 +70,7 @@ semantic/capability, P2 minor).
 | S4 | P1 | Claim ordering by `created_at` instead of ready-time FIFO with delayed-queue promotion | OPEN (P1) — observable interleaving differs from Locus |
 | S5 | P1 | Resting status after retryable failure is `FAILED` instead of `Pending` + future availability | INTENTIONAL (api-contract §169 defines the stow enum) |
 | S6 | P1 | `complete()` did not append `DELETE_REQUESTED`; deletion waited for the cleanup cycle | FIXED — both events append atomically, matching Locus and design §13 |
-| S7 | P1 | No per-tenant recovery gate; a duplicate `PROCESSING_TIMED_OUT` for one lease wedges the tenant projection | OPEN (P1) — port the recovery coordinator single-flight plus idempotent stale-timed-out skip |
+| S7 | P1 | No per-tenant recovery gate; a duplicate `PROCESSING_TIMED_OUT` for one lease wedges the tenant projection | FIXED — per-tenant single-flight reclaim plus the Locus stale-timed-out skip (a duplicate or superseded recovery event converges silently) |
 | S8 | P2 | `complete()` on missing metadata threw where Locus returns silently | INTENTIONAL — per-tenant stores cannot distinguish a foreign lease from a reaped row |
 | S9 | P2 | Completed rows kept stale `last_error` / `last_failed_at` / `available_at` | FIXED — completion projection clears them |
 | S10 | P2 | `PERMANENTLY_FAILED` rows reported a fake availability time | FIXED — permanent failures persist null availability |
@@ -86,14 +86,14 @@ semantic/capability, P2 minor).
 | P1 | P0 | Background projection starved tenants beyond `maxTenantsPerCycle` (no rotation) | FIXED — rotating start index; every tenant is served |
 | P2 | P0 | No startup database health check, auto-recovery, or orphan-tenant pipeline | FIXED — startup `quick_check`, damaged metadata rebuilt (backup + snapshot/journal replay) then quota recomputed |
 | P3 | P1 | Automatic snapshots and compaction never triggered; `compact()` unreachable from the API | FIXED — wired into the projection cycle per `snapshot.*`/`compaction.*` |
-| P4 | P1 | `rebuildMetadata`/`rebuildQuota` have no exclusive rebuild lock and move the live database | OPEN (P1) — port `BeginDatabaseRebuildAsync` operation blocking |
+| P4 | P1 | `rebuildMetadata`/`rebuildQuota` have no exclusive rebuild lock and move the live database | FIXED — rebuilds run under the tenant's exclusive metadata and quota stripe locks, draining in-flight operations before the database files move (Locus `BeginDatabaseRebuildAsync`) |
 | P5 | P1 | Rebuild did not reconcile quota counts afterwards | FIXED — manual rebuild and startup recovery recompute from the restored active set |
 | P6 | P1 | `rebuildFromMetadata` wiped explicit directory limits and in-flight reservations | FIXED — limits preserved, reservations kept and counted, empty unlimited rows pruned |
 | P7 | P1 | Snapshot content lacked creation time, active files, and quota state (contract §10) | FIXED — snapshot carries `createdAt`, active files, tenant/directory quota state, `contentCrc32` |
 | P8 | P2 | `state()` reported `Instant.now()` as the snapshot time | FIXED — reports the persisted creation time |
 | P9 | P2 | Manual snapshot could persist a mid-log snapshot | FIXED — the projector is caught up before the bounds check (Locus-aligned soft gate) |
 | P10 | P2 | Cursor persistence has no debounce (write amplification vs Locus 1 s dirty-cache) | OPEN (P2) — stow is more durable by design; optimize only if I/O matters |
-| P11 | P2 | Health check maps SQLITE_BUSY/LOCKED to DOWN; no startup retries (`integrity_check(1)` vs `quick_check`) | PARTIAL — `quick_check` itself is INTENTIONAL (contract §14); busy/locked classification and retries are OPEN (P2) |
+| P11 | P2 | Health check maps SQLITE_BUSY/LOCKED to DOWN; no startup retries (`integrity_check(1)` vs `quick_check`) | FIXED — busy/locked failures are retried briefly and reported DEGRADED instead of DOWN; `quick_check` itself remains INTENTIONAL (contract §14) |
 | P12 | P2 | `optimizeDatabases` uncoordinated and reported zero released bytes | PARTIAL — released bytes measured; tenant-lock coordination still OPEN (P2) |
 | P13 | P2 | `checkpointAfterBatch` accepted but inert | FIXED — `PRAGMA wal_checkpoint(PASSIVE)` after metadata batch commit when enabled |
 | P14 | P2 | `applied_events` / `applied_quota_events` never pruned | FIXED — pruned up to the compacted sequence after compaction (contract §6) |
@@ -116,7 +116,7 @@ semantic/capability, P2 minor).
 | Q8 | P2 | Directory normalization rejects inputs Locus canonicalizes | INTENTIONAL (stow validation contract) |
 | Q9 | P2 | Quota exceptions carried only a message | FIXED — structured tenant/directory, current, and max fields |
 | Q10 | P2 | Read APIs create rows as a side effect (`ensureTenant`/`ensureDirectory` on reads) | OPEN (P2) — read-only getters added where needed (`directoryLimit`); full parity pending |
-| Q11 | P2 | Metadata rows whose physical file vanished keep their quota charge forever | OPEN (P1 in practice) — same capability as W-domain cleanup item 6 |
+| Q11 | P2 | Metadata rows whose physical file vanished keep their quota charge forever | FIXED — scheduled orphaned-metadata cleanup removes such rows and releases their charges via reservation reconciliation (see C6) |
 
 ### 4.5 Cleanup, orphan recovery, watcher (20 findings)
 
@@ -127,7 +127,7 @@ semantic/capability, P2 minor).
 | C3 | P1 | `DELETE_REQUESTED` rows were physically deleted regardless of the retention cutoff | FIXED — physical deletion honors the completion-anchored retention window |
 | C4 | P1 | Empty-directory sweep deleted tenant roots and shard directories | FIXED — roots and `depth <= shardingDepth` protected; scan depth capped at 20 |
 | C5 | P1 | Backup cleanup, empty-directory cleanup, and `optimizeDatabases` were API-only | FIXED — scheduled in the cleanup cycle (daily VACUUM throttle); write-path temp sweeping intentionally stays startup-only (in-flight writes own those files) |
-| C6 | P1 | No orphaned-metadata removal (metadata without physical file) — Locus `CleanupOrphanedMetadataAsync` | OPEN (P1) — rows currently converge slowly through claim → fail → permanent → dead-letter while holding quota |
+| C6 | P1 | No orphaned-metadata removal (metadata without physical file) — Locus `CleanupOrphanedMetadataAsync` | FIXED — scheduled cleanup removes rows whose physical file vanished (skipping unavailable/unhealthy volumes, repairing corrected canonical paths in place) and releases their quota |
 | C7 | P1 | Watchers imported for disabled tenants | FIXED — disabled tenants are skipped, not failed |
 | C8 | P1 | Auto-managed watchers: zero stability checks, per-tenant watcher topology | OPEN (P1) — port root `minFileAge`, stability double-probe, one multi-tenant watcher per root |
 | C9 | P1 | SUBDIRECTORY_TENANTS mode mints tenant records from directory names | OPEN (P1) — Locus only creates directories for existing tenants; needs a semantics decision |
@@ -150,11 +150,11 @@ semantic/capability, P2 minor).
 | W1 | P0 | Volume selection pinned writes to the fullest volume; power-of-two selector was dead code | FIXED — `PowerOfTwoVolumeSelector.ordered` wired into candidate selection |
 | W2 | P0 | Disabled/unknown tenants not enforced on read/info/location/status; missing tenants misclassified | FIXED — full `requireEnabled` enforcement with distinct exceptions |
 | W3 | P0 | Filtered statistics queries always returned zeros (OPERATION-only dimension set) | FIXED — `VOLUME` and `WATCHER` dimensions retained, matching Locus defaults |
-| W4 | P1 | fileKey generation lacks Locus's burst-shard locality guarantee | OPEN (P1) — port the murmur3 shard-prefix overwriting of the first GUID bytes |
-| W5 | P1 | Write retries swallow any `RuntimeException` per candidate instead of IO-only seekable retries | OPEN (P1) — port `IsRetryableWriteFailure` |
+| W4 | P1 | fileKey generation lacks Locus's burst-shard locality guarantee | FIXED — per-process seeded shard prefix (murmur3 finalizer) overwrites the first two bytes, so bursts of up to 32 keys share one shard directory |
+| W5 | P1 | Write retries swallow any `RuntimeException` per candidate instead of IO-only seekable retries | FIXED — only I/O-class failures advance to the next candidate (Locus `IsRetryableWriteFailure`), and a failed write forces a health re-probe of that volume |
 | W6 | P1 | Move-failure after publish leaked the reservation | FIXED — rollback runs on every no-candidate failure; append-failure handling is INTENTIONAL (see Q6) |
 | W7 | P1 | Durable-write sequence differs (stow temp → fsync → move vs Locus in-place create) | INTENTIONAL — stow is strictly stronger (design §) |
-| W8 | P1 | Volume health: no write probe, 250 ms TTL, no mount-time gating | OPEN (P1) — port the probe + 30 s cache + mount gate (dead `VolumeRegistry` logic exists) |
+| W8 | P1 | Volume health: no write probe, 250 ms TTL, no mount-time gating | FIXED — 30 s cached probe with a write probe, forced re-probe after write failures and at mount time, and a startup mount gate requiring two consecutive forced passes |
 | W9 | P1 | Tenant lifecycle: idempotent create, no storage-path provisioning, no status cache, no `Suspended` | PARTIAL — `Suspended` is INTENTIONAL; create-idempotency/provisioning/caching are OPEN (P1) |
 | W10 | P1 | Tenant-ID charset stricter than Locus | INTENTIONAL (see J11) |
 | W11 | P1 | Extension handling drops extensions Locus preserves verbatim | INTENTIONAL (design §) |
@@ -162,7 +162,7 @@ semantic/capability, P2 minor).
 | W13 | P1 | Builder defaults differ (`autoCreateTenants`, `forceFlushAfterWrite`, required volume set, per-tenant preconfiguration) | OPEN (P1) — needs a documented decision per default; api-contract currently documents stow's values |
 | W14 | P2 | Idempotent-write details (`operationId` cap, per-call lookup vs full index) | OPEN (P2) |
 | W15 | P2 | `complete()` emitted no `DELETE_REQUESTED` | FIXED (see S6) |
-| W16 | P1 | No read-path physical-path self-heal (`TryCorrectMetadataPhysicalPathAsync`) | OPEN (P1 — promoted from P2; protects readers after volume repairs) |
+| W16 | P1 | No read-path physical-path self-heal (`TryCorrectMetadataPhysicalPathAsync`) | FIXED — a missing-file read rebuilds the canonical volume path, reads from it when the file is there, and persists the correction (CAS on row version); the orphaned-metadata cleaner reuses the same correction |
 | W17 | P2 | Capacity reporting granularity (1 s cache, distinct insufficient-storage messages) | OPEN (P2) |
 | W18 | P2 | Health model missing `journal`/`sqlite` components; no write-path diagnostics/metrics | OPEN (P2) |
 | W19 | P2 | Startup ordering: tenant initialization before journal replay; no readiness gates | OPEN (P2) — database recovery now runs before replay, which closes the ordering gap that mattered |
@@ -179,33 +179,34 @@ register row and in `stow-design.md`, `stow-api-contract.md`, and
 
 Open P1 items, ordered by expected production impact:
 
-1. Journal corrupt-tail prefix reads and repair-decision refactor (J2).
-2. Volume health probing with mount-time gating (W8).
-3. Read-path physical-path self-heal (W16, promoted from P2 because it
-   protects readers after volume repairs).
-4. Exclusive rebuild locking (P4).
-5. Orphaned-metadata cleanup with quota release (C6 / Q11).
-6. Auto-watcher stability and topology (C8).
-7. Statistics measurement names, output service, bounds validation (W12).
-8. Builder-default decisions (W13).
-9. Write retry conditions (W5).
-10. fileKey shard locality (W4).
-11. Duplicate timed-out protection (S7).
-12. Claim ordering semantics (S4).
-13. Tenant lifecycle parity — create/provision/cache (W9).
+1. Auto-watcher stability and topology (C8).
+2. Statistics measurement names, output service, bounds validation (W12).
+3. Builder-default decisions (W13).
+4. Claim ordering semantics (S4).
+5. Tenant lifecycle parity — create/provision/cache (W9).
+6. SUBDIRECTORY_TENANTS watcher mode mints tenant records (C9 — needs a
+   semantics decision).
+7. MOVE post-import layout mirrors the source subtree (C10 — needs a
+   semantics decision).
 
-Open P2 items: J12, J13, S12, P10, P11(busy classification), P12(locking),
-P15, P17(merge), P18, Q10, C12, C13, C14, C15, C16, C17, C18, C19, W14,
-W16(covered above), W17, W18, W19.
+Open P2 items: J12, J13, S12, P10, P12(locking), P15, P17(merge), P18,
+Q10, C12, C13, C14, C15, C16, C17, C18, C19, W14, W17, W18, W19.
 
 ## 7. Verification
 
-- `mvn clean verify`: BUILD SUCCESS — 270 core tests, 16 starter tests,
-  2 integration tests, spotless and spotbugs gates, zero compiler warnings
-  under `-Xlint:all`.
-- New regression tests cover: late-completion recovery, empty-claim inline
-  reclaim, statistics dimension retention, quota reservation reconciliation,
-  `forceReserve`, missing-permanent-failure convergence, damaged-database
-  startup recovery, and snapshot state round-trips.
+- `mvn clean verify`: BUILD SUCCESS — 281 core tests (5 symlink-assumption
+  skips on Windows), 16 starter tests, 2 integration tests, spotless and
+  spotbugs gates, zero compiler warnings under `-Xlint:all`.
+- Second-batch regression tests cover: corrupt-tail prefix reads with tail
+  repair (`FileQueueEventJournalTest`), stale duplicate timed-out skips
+  (`QueueEventReducerTest`), orphaned-metadata removal with quota release
+  (`OrphanedMetadataCleanerTest`), read-path physical-path self-heal
+  (`PhysicalPathSelfHealTest`), I/O-only write retries
+  (`WriteRetryConditionTest`), and fileKey shard locality
+  (`FileKeyGeneratorTest`).
+- Earlier regression tests cover: late-completion recovery, empty-claim
+  inline reclaim, statistics dimension retention, quota reservation
+  reconciliation, `forceReserve`, missing-permanent-failure convergence,
+  damaged-database startup recovery, and snapshot state round-trips.
 - Platform notes: five skipped tests require symbolic-link support and abort
   via JUnit assumptions on Windows environments without it.
