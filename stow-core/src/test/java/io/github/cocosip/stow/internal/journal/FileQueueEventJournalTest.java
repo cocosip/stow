@@ -239,7 +239,7 @@ class FileQueueEventJournalTest {
             journal.append(event("tenant-a", 3));
             Path log = root.resolve("tenant-a").resolve("queue.log");
             byte[] bytes = Files.readAllBytes(log);
-            bytes[bytes.length - 1] ^= 0xff; // break the final frame's CRC
+            bytes[bytes.length - 1] = (byte) (bytes[bytes.length - 1] ^ 0xff); // break the final frame's CRC
             Files.write(log, bytes);
 
             JournalReadBatch prefix = journal.readBatch("tenant-a", 0, 10);
