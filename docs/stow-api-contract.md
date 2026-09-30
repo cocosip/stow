@@ -436,7 +436,7 @@ during `build()`.
 | statistics | `maxSeries` | `16384` |
 
 Volumes require unique IDs, safe mount paths, sharding depth `0..3`, a
-positive buffer size, and default `forceFlushAfterWrite=false`. Watchers are
+positive buffer size, and default `forceFlushAfterWrite=true`. Watchers are
 empty by default; required fields are `watcher-id`, `tenant-id`, and
 `watch-path`. Their defaults are enabled, non-recursive, `[*]`, `KEEP`, a 5s
 poll interval, zero minimum age, a 100ms stability interval, two stability
