@@ -88,6 +88,7 @@ public final class WatcherScanner {
         ResultBuilder result = new ResultBuilder(configuration.watcherId(), started);
         history.prune(
                 configuration.watcherId(), configuration.historyRetention(), configuration.historyFlushInterval());
+        statistics.recordWatcherScan(configuration.watcherId());
         try (Stream<Path> candidates = discover(configuration);
                 ExecutorService executor = Executors.newFixedThreadPool(
                         configuration.concurrentImports(),
@@ -106,6 +107,7 @@ public final class WatcherScanner {
         } catch (RuntimeException exception) {
             result.error(tenantForError(configuration), "scan", exception);
         }
+        result.recordInto(statistics);
         return result.build(clock.instant());
     }
 
@@ -166,6 +168,10 @@ public final class WatcherScanner {
         } catch (io.github.cocosip.stow.exception.TenantDisabledException exception) {
             // Disabled tenants are skipped, not failed: importing for them would
             // violate isolation and their files stay for a later re-enable.
+            return Outcome.skippedOutcome();
+        } catch (UnknownTenantSourceException exception) {
+            // Files outside a tenant directory (or under an unknown one) are not
+            // import sources; Locus never mints tenants from directory names.
             return Outcome.skippedOutcome();
         } catch (RuntimeException exception) {
             return Outcome.failedOutcome(tenantForError(configuration), "import", exception);
@@ -261,7 +267,9 @@ public final class WatcherScanner {
         String tenantId = configuration.tenantId();
         if (configuration.tenantMode() == WatcherTenantMode.SUBDIRECTORY_TENANTS) {
             Path relative = configuration.watchPath().relativize(source);
-            if (relative.getNameCount() < 2) throw new IllegalStateException("Source is not under a tenant directory");
+            if (relative.getNameCount() < 2) {
+                throw new UnknownTenantSourceException("Source is not under a tenant directory");
+            }
             tenantId = relative.getName(0).toString();
         }
         Optional<TenantContext> existing = tenants.find(tenantId);
@@ -274,8 +282,11 @@ public final class WatcherScanner {
             }
             return tenant;
         }
-        if (!configuration.autoCreateTenantDirectories()) {
-            throw new IllegalStateException("Tenant does not exist: " + tenantId);
+        // In multi-tenant mode an unknown directory is not an import source: tenants
+        // are never minted from directory names (Locus-aligned, register C9).
+        if (configuration.tenantMode() == WatcherTenantMode.SUBDIRECTORY_TENANTS
+                || !configuration.autoCreateTenantDirectories()) {
+            throw new UnknownTenantSourceException("Tenant does not exist: " + tenantId);
         }
         return tenants.create(tenantId);
     }
@@ -392,6 +403,17 @@ public final class WatcherScanner {
 
     private record StableFile(long size, long modifiedAtMillis) {}
 
+    /** Marks a source that has no tenant to import for; treated as a skip, not a failure. */
+    private static final class UnknownTenantSourceException extends RuntimeException {
+
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
+
+        private UnknownTenantSourceException(String message) {
+            super(message);
+        }
+    }
+
     private record PathContentSource(Path path, long size) implements ContentSource {
         @Override
         public InputStream openStream() {
@@ -505,6 +527,21 @@ public final class WatcherScanner {
                     quarantined,
                     deferred,
                     errors);
+        }
+
+        private void recordInto(StatisticsRecorder statistics) {
+            long discoveredTotal;
+            long skippedTotal;
+            long failedTotal;
+            synchronized (this) {
+                discoveredTotal = discovered;
+                skippedTotal = skipped;
+                failedTotal = failed;
+            }
+            statistics.recordWatcherScanFiles(
+                    watcherId, StatisticsRecorder.WatcherFileOutcome.DISCOVERED, discoveredTotal);
+            statistics.recordWatcherScanFiles(watcherId, StatisticsRecorder.WatcherFileOutcome.SKIPPED, skippedTotal);
+            statistics.recordWatcherScanFiles(watcherId, StatisticsRecorder.WatcherFileOutcome.FAILED, failedTotal);
         }
     }
 }

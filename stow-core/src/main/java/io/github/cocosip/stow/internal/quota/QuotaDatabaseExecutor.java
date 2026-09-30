@@ -68,9 +68,11 @@ final class QuotaDatabaseExecutor {
             schema.ensure(connection);
             if (transactional) {
                 connection.setAutoCommit(false);
+                // Reads must not create rows as a side effect (register Q10): only
+                // writes ensure the singleton tenant row exists.
+                ensureTenant(connection, tenantId);
             }
             try {
-                ensureTenant(connection, tenantId);
                 T result = operation.run(connection);
                 if (transactional) {
                     connection.commit();

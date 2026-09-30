@@ -9,18 +9,16 @@ import io.github.cocosip.stow.model.WatcherTenantMode;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-/** Creates one durable watcher per tenant directory below a configured root. */
+/** Creates one durable multi-tenant watcher per configured root. */
 public final class DefaultFileWatcherAutoManager implements FileWatcherAutoManager {
 
     private final WatcherConfigurationStore store;
@@ -52,38 +50,21 @@ public final class DefaultFileWatcherAutoManager implements FileWatcherAutoManag
         Path rootPath = configuration.rootPath();
         try {
             Files.createDirectories(rootPath);
+            if (configuration.autoCreateTenantDirectories()) {
+                // Locus-aligned provisioning: import directories are created for
+                // existing tenants only; unknown directory names never mint tenants.
+                for (TenantContext tenant : tenants.list()) {
+                    Files.createDirectories(rootPath.resolve(tenant.tenantId()));
+                }
+            }
         } catch (IOException exception) {
             throw new IllegalStateException("Unable to initialize watcher root", exception);
         }
-        Set<String> managed = new HashSet<>();
-        try {
-            if (configuration.autoCreateTenantDirectories()) {
-                for (TenantContext tenant : tenants.list())
-                    Files.createDirectories(rootPath.resolve(tenant.tenantId()));
-            }
-            try (var paths = Files.list(rootPath)) {
-                paths.filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
-                        .sorted()
-                        .forEach(path -> {
-                            String tenantId = path.getFileName().toString();
-                            Optional<TenantContext> tenant = tenants.find(tenantId);
-                            if (tenant == null) tenant = Optional.empty();
-                            if (tenant.isEmpty()) {
-                                if (!configuration.autoCreateTenantDirectories()) return;
-                                tenant = Optional.of(tenants.create(tenantId));
-                            }
-                            WatcherConfiguration watcher = watcherFor(
-                                    configuration, tenant.orElseThrow().tenantId(), path);
-                            if (manager.find(watcher.watcherId()).isPresent()) manager.update(watcher);
-                            else manager.register(watcher);
-                            managed.add(watcher.watcherId());
-                        });
-            }
-        } catch (IOException exception) {
-            throw new IllegalStateException("Unable to discover watcher tenant directories", exception);
-        }
-        store.writeManagedWatcherIds(managed);
-        return managed.size();
+        WatcherConfiguration watcher = watcherFor(configuration);
+        if (manager.find(watcher.watcherId()).isPresent()) manager.update(watcher);
+        else manager.register(watcher);
+        store.writeManagedWatcherIds(Set.of(watcher.watcherId()));
+        return 1;
     }
 
     @Override
@@ -99,24 +80,24 @@ public final class DefaultFileWatcherAutoManager implements FileWatcherAutoManag
         return store.readRoot();
     }
 
-    private WatcherConfiguration watcherFor(WatcherRootConfiguration root, String tenantId, Path watchPath) {
+    private WatcherConfiguration watcherFor(WatcherRootConfiguration root) {
         return new WatcherConfiguration(
-                watcherId(root.rootPath(), tenantId),
-                tenantId,
-                WatcherTenantMode.SINGLE_TENANT,
+                watcherId(root.rootPath()),
+                null,
+                WatcherTenantMode.SUBDIRECTORY_TENANTS,
                 root.autoCreateTenantDirectories(),
-                watchPath,
+                root.rootPath(),
                 root.enabled(),
                 root.recursive(),
                 root.globs(),
                 root.postImportAction(),
                 root.moveDirectory(),
-                Duration.ofSeconds(30),
-                0,
-                Duration.ZERO,
-                Duration.ZERO,
-                1,
-                1,
+                root.pollInterval(),
+                root.maxFileSize(),
+                root.minimumFileAge(),
+                root.stabilityCheckInterval(),
+                root.stabilityCheckCount(),
+                root.concurrentImports(),
                 Duration.ofDays(30),
                 Duration.ofSeconds(5),
                 root.sourceCleanupFailureDirectory(),
@@ -125,19 +106,15 @@ public final class DefaultFileWatcherAutoManager implements FileWatcherAutoManag
                 Duration.ofMinutes(5));
     }
 
-    private static String watcherId(Path root, String tenantId) {
+    private static String watcherId(Path root) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update("multi-tenant:".getBytes(StandardCharsets.UTF_8));
             digest.update(root.toString().getBytes(StandardCharsets.UTF_8));
-            // the tenantId must be part of the digest: the readable suffix is truncated, and
-            // tenants sharing a prefix must not collide onto one watcher
-            digest.update((byte) 0);
-            digest.update(tenantId.getBytes(StandardCharsets.UTF_8));
             byte[] hashBytes = digest.digest();
             StringBuilder hash = new StringBuilder();
-            for (int index = 0; index < 6; index++) hash.append(String.format("%02x", hashBytes[index]));
-            String suffix = tenantId.length() > 110 ? tenantId.substring(0, 110) : tenantId;
-            return "auto-" + hash + "-" + suffix;
+            for (int index = 0; index < 8; index++) hash.append(String.format("%02x", hashBytes[index]));
+            return "auto-multi-tenant-" + hash;
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is unavailable", exception);
         }

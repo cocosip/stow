@@ -201,7 +201,7 @@ public final class SqliteMetadataProjectionStore {
                     WHERE tenant_id=?
                       AND status IN (?, ?)
                       AND (available_at_ms IS NULL OR available_at_ms <= ?)
-                    ORDER BY created_at_ms, file_key
+                    ORDER BY COALESCE(available_at_ms, created_at_ms), created_at_ms, file_key
                     LIMIT ?
                     """)) {
                 select.setString(1, tenantId);

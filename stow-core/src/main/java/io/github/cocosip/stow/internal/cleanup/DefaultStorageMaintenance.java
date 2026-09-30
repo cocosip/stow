@@ -209,23 +209,17 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
         OptimizationBuilder result = new OptimizationBuilder(clock);
         for (String tenantId : journal.tenantIds()) {
             result.scanned++;
-            boolean optimized = false;
-            for (DatabasePath database :
-                    List.of(new DatabasePath(metadataRoot, "metadata.db"), new DatabasePath(quotaRoot, "quotas.db"))) {
-                Path path = database.root.resolve(tenantId).resolve(database.fileName);
-                if (!Files.exists(path)) continue;
-                long before = databaseBytes(path);
-                try (var connection = DriverManager.getConnection("jdbc:sqlite:" + path);
-                        var statement = connection.createStatement()) {
-                    statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-                    statement.execute("VACUUM");
-                    result.released += Math.max(0, before - databaseBytes(path));
-                    optimized = true;
-                } catch (Exception exception) {
-                    result.failed++;
-                    result.errors.add(new MaintenanceError(tenantId, "optimize-database", message(exception)));
-                }
-            }
+            // VACUUM takes the SQLite write lock: hold the tenant's exclusive stripes
+            // so the optimizer cannot collide with a running projection batch.
+            SqliteMetadataProjectionStore metadataCoordinator = new SqliteMetadataProjectionStore(
+                    metadataRoot, io.github.cocosip.stow.internal.sqlite.SqliteConnectionFactory.defaults(), clock);
+            SqliteQuotaRepository quotaCoordinator = new SqliteQuotaRepository(
+                    quotaRoot,
+                    io.github.cocosip.stow.internal.sqlite.SqliteConnectionFactory.defaults(),
+                    clock,
+                    ignored -> 0);
+            boolean optimized = metadataCoordinator.exclusively(
+                    tenantId, () -> quotaCoordinator.exclusively(tenantId, () -> optimizeTenant(tenantId, result)));
             if (optimized) {
                 result.optimized++;
                 result.tenants.add(tenantId);
@@ -234,6 +228,27 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
             }
         }
         return result.build();
+    }
+
+    private boolean optimizeTenant(String tenantId, OptimizationBuilder result) {
+        boolean optimized = false;
+        for (DatabasePath database :
+                List.of(new DatabasePath(metadataRoot, "metadata.db"), new DatabasePath(quotaRoot, "quotas.db"))) {
+            Path path = database.root.resolve(tenantId).resolve(database.fileName);
+            if (!Files.exists(path)) continue;
+            long before = databaseBytes(path);
+            try (var connection = DriverManager.getConnection("jdbc:sqlite:" + path);
+                    var statement = connection.createStatement()) {
+                statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+                statement.execute("VACUUM");
+                result.released += Math.max(0, before - databaseBytes(path));
+                optimized = true;
+            } catch (Exception exception) {
+                result.failed++;
+                result.errors.add(new MaintenanceError(tenantId, "optimize-database", message(exception)));
+            }
+        }
+        return optimized;
     }
 
     @Override

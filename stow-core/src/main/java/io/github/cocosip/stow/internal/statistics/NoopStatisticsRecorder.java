@@ -48,6 +48,17 @@ public final class NoopStatisticsRecorder implements StatisticsRecorder {
     }
 
     @Override
+    public boolean recordWatcherScan(String watcherId) {
+        return true;
+    }
+
+    @Override
+    public boolean recordWatcherScanFiles(String watcherId, WatcherFileOutcome outcome, long count) {
+        if (count < 0) throw new IllegalArgumentException("count must not be negative");
+        return true;
+    }
+
+    @Override
     public StatisticsSnapshot snapshot(StatisticsQuery query) {
         Objects.requireNonNull(query, "query");
         Instant from = query.from();

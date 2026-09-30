@@ -111,6 +111,7 @@ public final class DefaultStowRuntime implements StowRuntime {
     private final Map<String, Instant> lastSnapshotAt = new ConcurrentHashMap<>();
     private volatile Instant lastBackgroundReclaimAt;
     private volatile Instant lastOptimizeAt;
+    private volatile Instant lastStatisticsOutputAt;
 
     DefaultStowRuntime(
             StowConfiguration configuration,
@@ -333,6 +334,15 @@ public final class DefaultStowRuntime implements StowRuntime {
             ownedResources.push(() -> closeVolumes(storageVolumes));
             gateVolumeMounts();
         }
+        // Attach provisioning roots so tenants created from now on get their
+        // directories pre-created (Locus storage-path provisioning). The runtime
+        // always constructs the concrete manager, so a plain cast is safe.
+        List<Path> provisioningRoots = new java.util.ArrayList<>();
+        provisioningRoots.add(configuration.paths().metadataDirectory());
+        provisioningRoots.add(configuration.paths().quotaDirectory());
+        provisioningRoots.add(configuration.paths().queueDirectory());
+        for (StorageVolume volume : storageVolumes) provisioningRoots.add(volume.mountPath());
+        ((DefaultTenantManager) tenantManager).provisionUnder(provisioningRoots);
 
         JournalCodec codec = journalCodec == null ? defaultJournalCodec() : journalCodec;
         eventJournal =
@@ -362,6 +372,8 @@ public final class DefaultStowRuntime implements StowRuntime {
                 terminalLeases::record);
         projectionMaintenanceService = new ProjectionMaintenanceService(
                 eventJournal, projectionService, cursors, snapshots, reducer, metadataProjection, quotaRepository);
+        projectionMaintenanceService.manualReplayBatchSize(
+                configuration.projection().manualReplayBatchSize());
 
         if (!storageVolumes.isEmpty()) {
             storagePoolService = new DefaultStoragePool(
@@ -631,7 +643,46 @@ public final class DefaultStowRuntime implements StowRuntime {
                 // VACUUM fails benignly under concurrent writers; the next day retries.
             }
         }
+        outputStatisticsIfNeeded(now);
     }
+
+    /**
+     * Optional periodic statistics output (Locus LocusStatisticsOutputOptions, logging
+     * sink): every configured interval a snapshot over the query window is written to
+     * the stow.statistics logger.
+     */
+    private void outputStatisticsIfNeeded(Instant now) {
+        io.github.cocosip.stow.config.StatisticsConfiguration statistics = configuration.statistics();
+        if (!statistics.enabled() || !statistics.outputEnabled()) return;
+        Instant previous = lastStatisticsOutputAt;
+        if (previous != null && now.isBefore(previous.plus(statistics.outputInterval()))) return;
+        lastStatisticsOutputAt = now;
+        try {
+            Instant to = now;
+            Instant from = to.minus(statistics.outputQueryWindow());
+            io.github.cocosip.stow.model.StatisticsSnapshot snapshot = statisticsReaderService.snapshot(
+                    new io.github.cocosip.stow.model.StatisticsQuery(from, to, null, null, null, null));
+            STATISTICS_LOGGER.log(
+                    System.Logger.Level.INFO,
+                    "statistics window from={0} to={1}: writtenFiles={2} writtenBytes={3} reads={4} claims={5} "
+                            + "completed={6} sqlitePersistence={7} watcherImports={8} watcherBytes={9} series={10}",
+                    from,
+                    to,
+                    snapshot.writtenFileCount(),
+                    snapshot.writtenBytes(),
+                    snapshot.readCount(),
+                    snapshot.claimCount(),
+                    snapshot.completedCount(),
+                    snapshot.sqlitePersistenceOperationCount(),
+                    snapshot.watcherImportedCount(),
+                    snapshot.watcherImportedBytes(),
+                    snapshot.series());
+        } catch (RuntimeException ignored) {
+            // A statistics output failure must never disturb the cleanup cycle.
+        }
+    }
+
+    private static final System.Logger STATISTICS_LOGGER = System.getLogger("stow.statistics");
 
     private void silentMaintenance(java.util.function.Supplier<CleanupStatistics> action) {
         try {

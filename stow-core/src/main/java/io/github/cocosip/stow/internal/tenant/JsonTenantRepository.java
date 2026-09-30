@@ -19,6 +19,9 @@ public final class JsonTenantRepository {
 
     private final AtomicJsonFile<TenantDocument> documentFile;
     private final ReentrantLock lock;
+    // The runtime-directory lock makes this process the sole writer, so the parsed
+    // document can be cached and refreshed on every mutation (Locus status cache).
+    private volatile TenantDocument cachedDocument;
 
     public JsonTenantRepository(Path metadataDirectory) {
         Path documentPath = metadataDirectory.toAbsolutePath().normalize().resolve("tenants.json");
@@ -38,7 +41,11 @@ public final class JsonTenantRepository {
     public TenantDocument read() {
         acquireLockInterruptibly();
         try {
-            return readUnlocked();
+            TenantDocument cached = cachedDocument;
+            if (cached != null) return cached;
+            TenantDocument read = readUnlocked();
+            cachedDocument = read;
+            return read;
         } finally {
             lock.unlock();
         }
@@ -52,6 +59,7 @@ public final class JsonTenantRepository {
             if (!updated.equals(current)) {
                 documentFile.write(updated);
             }
+            cachedDocument = updated;
             return updated;
         } catch (IOException exception) {
             throw new DatabaseRecoveryException("Unable to persist tenants.json", exception);

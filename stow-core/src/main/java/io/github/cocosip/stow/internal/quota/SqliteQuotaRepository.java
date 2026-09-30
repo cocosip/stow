@@ -32,11 +32,17 @@ public final class SqliteQuotaRepository {
     }
 
     public long tenantCurrentCount(String tenantId) {
-        return read(tenantId, connection -> tenantRow(connection).currentCount());
+        return read(tenantId, connection -> {
+            TenantRow row = tenantRowOrNull(connection);
+            return row == null ? 0 : row.currentCount();
+        });
     }
 
     public long tenantLimit(String tenantId) {
-        return read(tenantId, connection -> tenantRow(connection).maxCount());
+        return read(tenantId, connection -> {
+            TenantRow row = tenantRowOrNull(connection);
+            return row == null ? 0 : row.maxCount();
+        });
     }
 
     public void setTenantLimit(String tenantId, long maxFiles) {
@@ -60,10 +66,12 @@ public final class SqliteQuotaRepository {
 
     public DirectoryQuota directoryQuota(String tenantId, String logicalDirectory) {
         String normalized = normalizeDirectory(tenantId, logicalDirectory);
-        return write(tenantId, connection -> {
-            ensureDirectory(connection, normalized);
-            DirectoryRow row = directoryRow(connection, normalized);
-            return new DirectoryQuota(tenantId, normalized, row.currentCount(), row.maxCount(), row.enabled());
+        // A read must not create the directory row; an absent row reads as unlimited.
+        return read(tenantId, connection -> {
+            DirectoryRow row = directoryRowOrNull(connection, normalized);
+            return row == null
+                    ? new DirectoryQuota(tenantId, normalized, 0, 0, true)
+                    : new DirectoryQuota(tenantId, normalized, row.currentCount(), row.maxCount(), row.enabled());
         });
     }
 
@@ -335,6 +343,15 @@ public final class SqliteQuotaRepository {
         }
     }
 
+    /** Read-side lookup: a missing singleton means zero counts with no explicit limit. */
+    private static TenantRow tenantRowOrNull(Connection connection) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT current_count, max_count, row_version FROM tenant_quota WHERE singleton_id=1");
+                ResultSet result = statement.executeQuery()) {
+            return result.next() ? new TenantRow(result.getLong(1), result.getLong(2), result.getLong(3)) : null;
+        }
+    }
+
     private static DirectoryRow directoryRow(Connection connection, String logicalDirectory) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 """
@@ -347,6 +364,23 @@ public final class SqliteQuotaRepository {
                     throw new SQLException("Directory quota row is missing");
                 }
                 return new DirectoryRow(result.getLong(1), result.getLong(2), result.getInt(3) == 1, result.getLong(4));
+            }
+        }
+    }
+
+    /** Read-side lookup: a missing directory row reads as zero counts with no limit. */
+    private static DirectoryRow directoryRowOrNull(Connection connection, String logicalDirectory) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                """
+                SELECT current_count, max_count, enabled, row_version
+                FROM directory_quotas WHERE logical_directory=?
+                """)) {
+            statement.setString(1, logicalDirectory);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next()
+                        ? new DirectoryRow(
+                                result.getLong(1), result.getLong(2), result.getInt(3) == 1, result.getLong(4))
+                        : null;
             }
         }
     }

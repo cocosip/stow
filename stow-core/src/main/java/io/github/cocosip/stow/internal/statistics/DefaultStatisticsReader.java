@@ -68,4 +68,14 @@ public final class DefaultStatisticsReader implements StatisticsRecorder {
     public boolean recordWatcherImport(String watcherId, String tenantId, long bytes) {
         return delegate.recordWatcherImport(watcherId, tenantId, bytes);
     }
+
+    @Override
+    public boolean recordWatcherScan(String watcherId) {
+        return delegate.recordWatcherScan(watcherId);
+    }
+
+    @Override
+    public boolean recordWatcherScanFiles(String watcherId, WatcherFileOutcome outcome, long count) {
+        return delegate.recordWatcherScanFiles(watcherId, outcome, count);
+    }
 }

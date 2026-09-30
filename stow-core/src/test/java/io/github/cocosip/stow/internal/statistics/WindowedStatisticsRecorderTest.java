@@ -92,8 +92,9 @@ class WindowedStatisticsRecorderTest {
         recorder.recordRead("tenant-a", "volume-a");
         StatisticsSnapshot snapshot = recorder.snapshot(
                 new StatisticsQuery(Instant.EPOCH, clock.instant().plusSeconds(60), null, null, null, null));
-        assertThat(snapshot.series().get("operation=write")).isEqualTo(2);
-        assertThat(snapshot.series().get("operation=read")).isEqualTo(1);
+        assertThat(snapshot.series().get("operation=storage.write.success.count"))
+                .isEqualTo(2);
+        assertThat(snapshot.series().get("operation=storage.file.read.count")).isEqualTo(1);
         assertThat(snapshot.writtenFileCount()).isEqualTo(2);
         assertThat(snapshot.readCount()).isEqualTo(1);
     }
@@ -109,10 +110,11 @@ class WindowedStatisticsRecorderTest {
                 EnumSet.of(StatisticDimension.OPERATION, StatisticDimension.TENANT));
         recorder.recordWrite("tenant-a", "volume-a", 10);
         recorder.recordWrite("tenant-a10", "volume-a", 10);
-        StatisticsSnapshot snapshot = recorder.snapshot(
-                new StatisticsQuery(Instant.EPOCH, clock.instant().plusSeconds(60), "tenant-a", null, null, "write"));
+        StatisticsSnapshot snapshot = recorder.snapshot(new StatisticsQuery(
+                Instant.EPOCH, clock.instant().plusSeconds(60), "tenant-a", null, null, "storage.write.success.count"));
         assertThat(snapshot.series()).hasSize(1);
-        assertThat(snapshot.series().get("operation=write|tenant=tenant-a")).isEqualTo(1);
+        assertThat(snapshot.series().get("operation=storage.write.success.count|tenant=tenant-a"))
+                .isEqualTo(1);
         assertThat(snapshot.writtenFileCount()).isEqualTo(1);
     }
 

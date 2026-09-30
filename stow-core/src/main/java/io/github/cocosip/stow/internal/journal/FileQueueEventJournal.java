@@ -250,7 +250,20 @@ public final class FileQueueEventJournal implements QueueEventJournal {
 
     @Override
     public Set<String> tenantIds() {
-        return Collections.unmodifiableSet(new TreeSet<>(tenants.keySet()));
+        // Directory enumeration (Locus GetTenantIdsAsync) unioned with the in-memory
+        // snapshot so a tenant registered this process never disappears mid-lifecycle.
+        Set<String> ids = new TreeSet<>();
+        try (var directories = Files.list(queueDirectory)) {
+            directories
+                    .filter(Files::isDirectory)
+                    .map(directory -> directory.getFileName().toString())
+                    .filter(name -> name.matches("[A-Za-z0-9._-]{1,128}"))
+                    .forEach(ids::add);
+        } catch (IOException ignored) {
+            // The in-memory snapshot still answers for tenants this process knows.
+        }
+        ids.addAll(tenants.keySet());
+        return Collections.unmodifiableSet(ids);
     }
 
     @Override

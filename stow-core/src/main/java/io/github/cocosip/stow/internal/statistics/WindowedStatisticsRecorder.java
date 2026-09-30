@@ -49,33 +49,55 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
     @Override
     public boolean recordWrite(String tenantId, String volumeId, long bytes) {
         requireBytes(bytes);
-        return record("write", tenantId, volumeId, null, bytes, Metric.WRITE);
+        return record(Measurement.STORAGE_WRITE_SUCCESS, tenantId, volumeId, null, bytes, Metric.WRITE);
     }
 
     @Override
     public boolean recordRead(String tenantId, String volumeId) {
-        return record("read", tenantId, volumeId, null, 0, Metric.READ);
+        return record(Measurement.STORAGE_FILE_READ, tenantId, volumeId, null, 0, Metric.READ);
     }
 
     @Override
     public boolean recordClaim(String tenantId) {
-        return record("claim", tenantId, null, null, 0, Metric.CLAIM);
+        return record(Measurement.STORAGE_FILE_DEQUEUED, tenantId, null, null, 0, Metric.CLAIM);
     }
 
     @Override
     public boolean recordCompleted(String tenantId) {
-        return record("completed", tenantId, null, null, 0, Metric.COMPLETED);
+        return record(Measurement.STORAGE_FILE_COMPLETED, tenantId, null, null, 0, Metric.COMPLETED);
     }
 
     @Override
     public boolean recordSqlitePersistence(String tenantId) {
-        return record("sqlite-persistence", tenantId, null, null, 0, Metric.SQLITE);
+        return record(Measurement.SQLITE_PERSISTENCE, tenantId, null, null, 0, Metric.SQLITE);
     }
 
     @Override
     public boolean recordWatcherImport(String watcherId, String tenantId, long bytes) {
         requireBytes(bytes);
-        return record("watcher-import", tenantId, null, watcherId, bytes, Metric.WATCHER);
+        return record(Measurement.WATCHER_FILES_IMPORTED, tenantId, null, watcherId, bytes, Metric.WATCHER);
+    }
+
+    @Override
+    public boolean recordWatcherScan(String watcherId) {
+        return record(Measurement.WATCHER_SCAN, null, null, watcherId, 0, Metric.SCAN);
+    }
+
+    @Override
+    public boolean recordWatcherScanFiles(String watcherId, WatcherFileOutcome outcome, long count) {
+        if (count < 0) throw new IllegalArgumentException("count must not be negative");
+        Measurement measurement =
+                switch (outcome) {
+                    case DISCOVERED -> Measurement.WATCHER_FILES_DISCOVERED;
+                    case SKIPPED -> Measurement.WATCHER_FILES_SKIPPED;
+                    case FAILED -> Measurement.WATCHER_FILES_FAILED;
+                };
+        boolean recorded = true;
+        for (long index = 0; index < count; index++) {
+            // One operation per file keeps the per-label operation counters exact.
+            recorded &= record(measurement, null, null, watcherId, 0, Metric.SCAN);
+        }
+        return recorded;
     }
 
     @Override
@@ -123,14 +145,14 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
     }
 
     private boolean record(
-            String operation, String tenantId, String volumeId, String watcherId, long bytes, Metric metric) {
+            Measurement measurement, String tenantId, String volumeId, String watcherId, long bytes, Metric metric) {
         validateValue(tenantId, "tenantId");
         validateValue(volumeId, "volumeId");
         validateValue(watcherId, "watcherId");
         long now = clock.instant().toEpochMilli();
         prune(Instant.ofEpochMilli(now));
         Bucket bucket = buckets.computeIfAbsent(bucketStart(now), Bucket::new);
-        String label = label(operation, tenantId, volumeId, watcherId);
+        String label = label(measurement, tenantId, volumeId, watcherId);
         synchronized (bucket) {
             Series series = bucket.series.get(label);
             if (series == null) {
@@ -145,9 +167,9 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
         }
     }
 
-    private String label(String operation, String tenantId, String volumeId, String watcherId) {
+    private String label(Measurement measurement, String tenantId, String volumeId, String watcherId) {
         List<String> parts = new ArrayList<>();
-        if (dimensions.contains(StatisticDimension.OPERATION)) parts.add("operation=" + operation);
+        if (dimensions.contains(StatisticDimension.OPERATION)) parts.add("operation=" + measurement.name);
         if (dimensions.contains(StatisticDimension.TENANT)) parts.add("tenant=" + valueOrNone(tenantId));
         if (dimensions.contains(StatisticDimension.VOLUME)) parts.add("volume=" + valueOrNone(volumeId));
         if (dimensions.contains(StatisticDimension.WATCHER)) parts.add("watcher=" + valueOrNone(watcherId));
@@ -196,13 +218,34 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
         if (bytes < 0) throw new IllegalArgumentException("bytes must not be negative");
     }
 
+    /** Locus-canonical measurement names; SQLITE_PERSISTENCE is stow-specific. */
+    private enum Measurement {
+        STORAGE_WRITE_SUCCESS("storage.write.success.count"),
+        STORAGE_FILE_READ("storage.file.read.count"),
+        STORAGE_FILE_DEQUEUED("storage.file.dequeued.count"),
+        STORAGE_FILE_COMPLETED("storage.file.completed.count"),
+        SQLITE_PERSISTENCE("sqlite.persistence.count"),
+        WATCHER_FILES_IMPORTED("watcher.files.imported"),
+        WATCHER_SCAN("watcher.scan.count"),
+        WATCHER_FILES_DISCOVERED("watcher.files.discovered"),
+        WATCHER_FILES_SKIPPED("watcher.files.skipped"),
+        WATCHER_FILES_FAILED("watcher.files.failed");
+
+        private final String name;
+
+        Measurement(String name) {
+            this.name = name;
+        }
+    }
+
     private enum Metric {
         WRITE,
         READ,
         CLAIM,
         COMPLETED,
         SQLITE,
-        WATCHER;
+        WATCHER,
+        SCAN;
 
         private void add(Counters counters, long bytes) {
             switch (this) {
@@ -217,6 +260,9 @@ public final class WindowedStatisticsRecorder implements StatisticsRecorder {
                 case WATCHER -> {
                     counters.watcherImports.increment();
                     counters.watcherBytes.add(bytes);
+                }
+                case SCAN -> {
+                    // Scan measurements surface through the per-label series only.
                 }
             }
         }

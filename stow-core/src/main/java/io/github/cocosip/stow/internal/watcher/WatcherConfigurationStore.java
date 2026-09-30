@@ -366,7 +366,13 @@ public final class WatcherConfigurationStore {
             List<String> globs,
             String postImportAction,
             String moveDirectory,
-            String sourceCleanupFailureDirectory) {
+            String sourceCleanupFailureDirectory,
+            Long pollIntervalMillis,
+            Long maxFileSize,
+            Long minimumFileAgeMillis,
+            Long stabilityCheckIntervalMillis,
+            Integer stabilityCheckCount,
+            Integer concurrentImports) {
 
         static RootDocument from(WatcherRootConfiguration model) {
             return new RootDocument(
@@ -380,12 +386,19 @@ public final class WatcherConfigurationStore {
                     model.moveDirectory() == null ? null : model.moveDirectory().toString(),
                     model.sourceCleanupFailureDirectory() == null
                             ? null
-                            : model.sourceCleanupFailureDirectory().toString());
+                            : model.sourceCleanupFailureDirectory().toString(),
+                    model.pollInterval().toMillis(),
+                    model.maxFileSize(),
+                    model.minimumFileAge().toMillis(),
+                    model.stabilityCheckInterval().toMillis(),
+                    model.stabilityCheckCount(),
+                    model.concurrentImports());
         }
 
         WatcherRootConfiguration toModel() {
             if (schemaVersion != 1 && schemaVersion != ROOT_SCHEMA_VERSION)
                 throw new IllegalArgumentException("Unsupported watcher root schema version");
+            // Older documents predate the tuning fields; they default like the model.
             return new WatcherRootConfiguration(
                     Path.of(rootPath),
                     enabled,
@@ -396,7 +409,13 @@ public final class WatcherConfigurationStore {
                     moveDirectory == null ? null : Path.of(moveDirectory),
                     schemaVersion == 1
                             ? Path.of("stow-source-failed")
-                            : sourceCleanupFailureDirectory == null ? null : Path.of(sourceCleanupFailureDirectory));
+                            : sourceCleanupFailureDirectory == null ? null : Path.of(sourceCleanupFailureDirectory),
+                    Duration.ofMillis(pollIntervalMillis == null ? 30_000 : pollIntervalMillis),
+                    maxFileSize == null ? 0 : maxFileSize,
+                    Duration.ofMillis(minimumFileAgeMillis == null ? 5_000 : minimumFileAgeMillis),
+                    Duration.ofMillis(stabilityCheckIntervalMillis == null ? 100 : stabilityCheckIntervalMillis),
+                    stabilityCheckCount == null ? 2 : stabilityCheckCount,
+                    concurrentImports == null ? 4 : concurrentImports);
         }
     }
 

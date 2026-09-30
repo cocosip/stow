@@ -25,6 +25,7 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
     private final QueueEventReducer reducer;
     private final SqliteMetadataProjectionStore metadata;
     private final io.github.cocosip.stow.internal.quota.SqliteQuotaRepository quota;
+    private volatile int manualReplayBatchSize = 256;
 
     public ProjectionMaintenanceService(
             QueueEventJournal journal,
@@ -60,6 +61,12 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
         this.quota = quota;
     }
 
+    /** Overrides the manual replay batch size (projection.manualReplayBatchSize). */
+    public void manualReplayBatchSize(int batchSize) {
+        if (batchSize <= 0) throw new IllegalArgumentException("batchSize must be positive");
+        this.manualReplayBatchSize = batchSize;
+    }
+
     @Override
     public ProjectionTenantState state(String tenantId) {
         long base = journal.baseOffset(tenantId);
@@ -81,7 +88,7 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
     @Override
     public ProjectionTenantState replay(String tenantId) {
         if (projection == null) throw new IllegalStateException("projection service is not configured");
-        projection.projectTenantUntilCaughtUp(tenantId, 256);
+        projection.projectTenantUntilCaughtUp(tenantId, manualReplayBatchSize);
         return state(tenantId);
     }
 

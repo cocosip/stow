@@ -16,6 +16,7 @@ import java.sql.DriverManager;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -216,6 +217,78 @@ class QueueEventReducerTest {
             assertThat(row.status()).isEqualTo(FileProcessingStatus.PROCESSING);
             assertThat(row.leaseId()).isEqualTo(activeLease.toString());
         });
+    }
+
+    @Test
+    void claimsInReadyTimeOrderNotCreationOrder() {
+        SqliteQuotaRepository quota =
+                new SqliteQuotaRepository(temp, SqliteConnectionFactory.defaults(), CLOCK, ignored -> 10);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(temp, SqliteConnectionFactory.defaults(), CLOCK);
+        QueueEventReducer reducer = new QueueEventReducer(metadata, quota);
+        // X (KEY) is created first but retryable-fails with availability at T+100;
+        // Y is created later (T+50) and stays pending.
+        quota.reserve(TENANT, KEY, DIR);
+        reducer.apply(event(1, QueueEventType.ACCEPTED, FileProcessingStatus.PENDING, null, null, 0));
+        UUID lease = UUID.randomUUID();
+        reducer.apply(event(2, QueueEventType.PROCESSING_STARTED, FileProcessingStatus.PROCESSING, lease, NOW, 0));
+        reducer.apply(failedEvent(3, lease, NOW.plusSeconds(90), NOW.plusSeconds(100)));
+        String laterKey = "ffffffffffffffffffffffffffffffff";
+        quota.reserve(TENANT, laterKey, DIR);
+        reducer.apply(acceptedEvent(4, laterKey, NOW.plusSeconds(50)));
+
+        // At T+150 both are ready: Y's ready time (T+50) precedes X's (T+100),
+        // so ready-time FIFO claims Y first even though X was created earlier.
+        List<SqliteMetadataProjectionStore.ClaimedRow> claimed =
+                metadata.claimAvailable(TENANT, 10, Instant.ofEpochSecond(NOW.getEpochSecond() + 150));
+
+        assertThat(claimed).extracting(row -> row.row().fileKey()).containsExactly(laterKey, KEY);
+    }
+
+    private QueueEventRecord failedEvent(long sequence, UUID lease, Instant failedAt, Instant availableAt) {
+        return new QueueEventRecord(
+                1,
+                UUID.randomUUID(),
+                TENANT,
+                KEY,
+                QueueEventType.PROCESSING_FAILED,
+                failedAt,
+                sequence,
+                "volume-a",
+                Path.of("/tmp/file"),
+                DIR,
+                12,
+                FileProcessingStatus.FAILED,
+                lease,
+                null,
+                1,
+                availableAt,
+                null,
+                "file.bin",
+                ".bin");
+    }
+
+    private QueueEventRecord acceptedEvent(long sequence, String fileKey, Instant occurredAt) {
+        return new QueueEventRecord(
+                1,
+                UUID.randomUUID(),
+                TENANT,
+                fileKey,
+                QueueEventType.ACCEPTED,
+                occurredAt,
+                sequence,
+                "volume-a",
+                Path.of("/tmp/" + fileKey),
+                DIR,
+                12,
+                FileProcessingStatus.PENDING,
+                null,
+                null,
+                0,
+                null,
+                null,
+                "file.bin",
+                ".bin");
     }
 
     private QueueEventRecord event(

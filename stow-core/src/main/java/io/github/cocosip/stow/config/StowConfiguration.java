@@ -160,6 +160,9 @@ public record StowConfiguration(
         private Duration statisticsWindowSize = Duration.ofMinutes(5);
         private Duration statisticsRetention = Duration.ofHours(1);
         private int statisticsMaxSeries = 16_384;
+        private boolean statisticsOutputEnabled;
+        private Duration statisticsOutputInterval = Duration.ofMinutes(1);
+        private Duration statisticsOutputQueryWindow = Duration.ofMinutes(15);
         private List<WatcherConfiguration> watchers = List.of();
 
         private Builder() {}
@@ -534,6 +537,21 @@ public record StowConfiguration(
             return this;
         }
 
+        public Builder statisticsOutputEnabled(boolean value) {
+            statisticsOutputEnabled = value;
+            return this;
+        }
+
+        public Builder statisticsOutputInterval(Duration value) {
+            statisticsOutputInterval = value;
+            return this;
+        }
+
+        public Builder statisticsOutputQueryWindow(Duration value) {
+            statisticsOutputQueryWindow = value;
+            return this;
+        }
+
         public Builder watchers(List<WatcherConfiguration> value) {
             watchers = List.copyOf(ConfigurationValidation.nonNull("watchers", value));
             return this;
@@ -610,7 +628,13 @@ public record StowConfiguration(
                             sourceCleanupDatabaseOptimizationInterval,
                             sourceCleanupTerminalPruneBatchSize),
                     new StatisticsConfiguration(
-                            statisticsEnabled, statisticsWindowSize, statisticsRetention, statisticsMaxSeries),
+                            statisticsEnabled,
+                            statisticsWindowSize,
+                            statisticsRetention,
+                            statisticsMaxSeries,
+                            statisticsOutputEnabled,
+                            statisticsOutputInterval,
+                            statisticsOutputQueryWindow),
                     watchers);
         }
     }

@@ -5,6 +5,7 @@ import io.github.cocosip.stow.exception.TenantNotFoundException;
 import io.github.cocosip.stow.internal.tenant.TenantDocument.TenantEntry;
 import io.github.cocosip.stow.model.TenantContext;
 import io.github.cocosip.stow.model.TenantStatus;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -18,6 +19,10 @@ public final class DefaultTenantManager implements TenantManager {
     private final Clock clock;
     private final boolean autoCreateTenants;
     private final long defaultQuota;
+    // Tenant directories provisioned under these roots when a tenant is created
+    // (metadata, quota, queue, and volume mounts), mirroring Locus storage-path
+    // provisioning; empty when the runtime has not attached roots yet.
+    private final java.util.Set<Path> provisioningRoots = new java.util.HashSet<>();
 
     public DefaultTenantManager(
             JsonTenantRepository repository, Clock clock, boolean autoCreateTenants, long defaultQuota) {
@@ -60,6 +65,7 @@ public final class DefaultTenantManager implements TenantManager {
     @Override
     public TenantContext create(String tenantId) {
         validateTenantId(tenantId);
+        boolean[] created = {false};
         TenantDocument updated = repository.update(document -> {
             Optional<TenantEntry> existing = document.tenants().stream()
                     .filter(tenant -> tenant.tenantId().equals(tenantId))
@@ -67,17 +73,42 @@ public final class DefaultTenantManager implements TenantManager {
             if (existing.isPresent()) {
                 return document;
             }
+            created[0] = true;
             Instant now = clock.instant();
             List<TenantEntry> tenants = new ArrayList<>(document.tenants());
             tenants.add(new TenantEntry(tenantId, TenantStatus.ENABLED, now, now, defaultQuota));
             tenants.sort(Comparator.comparing(TenantEntry::tenantId));
             return new TenantDocument(TenantDocument.CURRENT_SCHEMA_VERSION, tenants);
         });
+        if (created[0]) {
+            provisionStoragePaths(tenantId);
+        }
         return updated.tenants().stream()
                 .filter(tenant -> tenant.tenantId().equals(tenantId))
                 .findFirst()
                 .orElseThrow()
                 .toContext();
+    }
+
+    /** Attaches runtime roots (metadata, quota, queue, volume mounts) for provisioning. */
+    public void provisionUnder(List<Path> roots) {
+        for (Path root : roots) {
+            if (root != null) provisioningRoots.add(root.toAbsolutePath().normalize());
+        }
+        // Tenants that already exist (preconfigured or restored) get their directories too.
+        for (TenantContext tenant : list()) {
+            provisionStoragePaths(tenant.tenantId());
+        }
+    }
+
+    private void provisionStoragePaths(String tenantId) {
+        for (Path root : provisioningRoots) {
+            try {
+                java.nio.file.Files.createDirectories(root.resolve(tenantId));
+            } catch (java.io.IOException exception) {
+                throw new IllegalStateException("Unable to provision storage path for tenant " + tenantId, exception);
+            }
+        }
     }
 
     public long quotaLimit(String tenantId) {

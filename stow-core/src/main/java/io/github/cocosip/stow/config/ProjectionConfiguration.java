@@ -7,7 +7,8 @@ public record ProjectionConfiguration(
         int maxTenantsPerCycle,
         Duration busyCycleDelay,
         Duration idleCycleDelay,
-        Duration cycleTimeBudget) {
+        Duration cycleTimeBudget,
+        int manualReplayBatchSize) {
 
     public ProjectionConfiguration {
         ConfigurationValidation.positive("projection.maxRecordsPerTenantCycle", maxRecordsPerTenantCycle);
@@ -15,5 +16,15 @@ public record ProjectionConfiguration(
         ConfigurationValidation.nonNegative("projection.busyCycleDelay", busyCycleDelay);
         ConfigurationValidation.nonNegative("projection.idleCycleDelay", idleCycleDelay);
         ConfigurationValidation.positive("projection.cycleTimeBudget", cycleTimeBudget);
+        ConfigurationValidation.positive("projection.manualReplayBatchSize", manualReplayBatchSize);
+    }
+
+    public ProjectionConfiguration(
+            int maxRecordsPerTenantCycle,
+            int maxTenantsPerCycle,
+            Duration busyCycleDelay,
+            Duration idleCycleDelay,
+            Duration cycleTimeBudget) {
+        this(maxRecordsPerTenantCycle, maxTenantsPerCycle, busyCycleDelay, idleCycleDelay, cycleTimeBudget, 256);
     }
 }
