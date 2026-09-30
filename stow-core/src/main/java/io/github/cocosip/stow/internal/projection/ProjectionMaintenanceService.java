@@ -140,6 +140,15 @@ public final class ProjectionMaintenanceService implements QueueProjectionMainte
     @Override
     public synchronized ProjectionTenantState rebuild(String tenantId) {
         if (reducer == null) throw new IllegalStateException("reducer is not configured");
+        if (metadata == null || quota == null) {
+            return rebuildLocked(tenantId);
+        }
+        // The replay must not interleave with concurrent projection batches (Locus
+        // BeginDatabaseRebuildAsync holds the exclusive tenant lock for the rebuild).
+        return metadata.exclusively(tenantId, () -> quota.exclusively(tenantId, () -> rebuildLocked(tenantId)));
+    }
+
+    private ProjectionTenantState rebuildLocked(String tenantId) {
         reducer.resetMetadata(tenantId);
         ProjectionSnapshotStore.Snapshot snapshot = snapshots.load(tenantId);
         long base = journal.baseOffset(tenantId);

@@ -14,6 +14,14 @@ public interface StorageVolume extends AutoCloseable {
 
     boolean healthy();
 
+    /**
+     * Forces a synchronous health probe, bypassing any cached result. Called after a
+     * failed write so candidate selection re-evaluates the volume on fresh evidence.
+     */
+    default boolean probeHealth() {
+        return healthy();
+    }
+
     long totalCapacity();
 
     long availableCapacity();

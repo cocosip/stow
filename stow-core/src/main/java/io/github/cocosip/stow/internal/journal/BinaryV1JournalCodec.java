@@ -25,6 +25,7 @@ public final class BinaryV1JournalCodec implements JournalCodec {
         QueueEventRecord event = QueueEventJson.decode(frame.payload());
         if (frame.sequenceNumber() != event.sequenceNumber()) {
             throw new io.github.cocosip.stow.exception.JournalCorruptionException(
+                    io.github.cocosip.stow.exception.JournalCorruptionException.Reason.SEQUENCE,
                     "Journal frame sequence does not match queue event sequence");
         }
         return event;

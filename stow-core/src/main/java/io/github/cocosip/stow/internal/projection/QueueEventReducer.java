@@ -177,6 +177,11 @@ public final class QueueEventReducer {
 
     private static void timedOut(Connection c, QueueEventRecord e, Optional<SqliteMetadataProjectionStore.FileRow> row)
             throws SQLException {
+        if (row.isPresent() && staleTimedOut(row.orElseThrow(), e)) {
+            // Locus ShouldSkipTimedOutProjection: a duplicate or superseded recovery
+            // event converges silently instead of wedging the tenant's projection.
+            return;
+        }
         SqliteMetadataProjectionStore.FileRow current = require(row, "PROCESSING_TIMED_OUT");
         requireStatus(current, FileProcessingStatus.PROCESSING);
         requireLease(current, e);
@@ -188,6 +193,32 @@ public final class QueueEventReducer {
                 FileProcessingStatus.PENDING.ordinal(),
                 e.sequenceNumber(),
                 e.fileKey());
+    }
+
+    /**
+     * True when the timed-out event no longer describes the row: the lease already
+     * ended in a failure, completion, or an earlier reclaim, or a newer lease owns
+     * the file. Only these post-lease resolutions are tolerated; a lease mismatch on
+     * an actively processing row remains a conflict.
+     */
+    private static boolean staleTimedOut(SqliteMetadataProjectionStore.FileRow current, QueueEventRecord e) {
+        if (current.status() != FileProcessingStatus.PROCESSING
+                || current.leaseId() == null
+                || current.processingStartedAtMillis() == null) {
+            return true;
+        }
+        if (e.processingStartedAt() != null
+                && current.processingStartedAtMillis() > e.processingStartedAt().toEpochMilli()) {
+            return true;
+        }
+        if (current.lastFailedAtMillis() != null
+                && e.occurredAt() != null
+                && current.lastFailedAtMillis() >= e.occurredAt().toEpochMilli()) {
+            return true;
+        }
+        return current.completedAtMillis() != null
+                && e.occurredAt() != null
+                && current.completedAtMillis() >= e.occurredAt().toEpochMilli();
     }
 
     private static void completed(Connection c, QueueEventRecord e, Optional<SqliteMetadataProjectionStore.FileRow> row)

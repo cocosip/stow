@@ -65,9 +65,12 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
     private final List<StorageVolume> volumes;
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
+    private final io.github.cocosip.stow.internal.filesystem.FileKeyGenerator fileKeys =
+            new io.github.cocosip.stow.internal.filesystem.FileKeyGenerator();
     private final StripedFileLock fileLocks;
     private final StripedFileLock idempotentWriteLocks;
     private final ConcurrentMap<String, String> operationFileKeys = new ConcurrentHashMap<>();
+    private final java.util.Set<String> reclaimingTenants = ConcurrentHashMap.newKeySet();
     private final TerminalLeaseIndex terminalLeases;
     private final RetryDelayCalculator retryDelays;
     private final PoolSettings settings;
@@ -351,7 +354,8 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
             } catch (RuntimeException failure) {
                 lastFailure = failure;
                 compensation.cleanupCandidate();
-                if (!repeatable) break;
+                reprobeAfterFailure(volume);
+                if (!repeatable || !isRetryableWriteFailure(failure)) break;
             }
         }
         if (selected == null) {
@@ -407,6 +411,25 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
         return PowerOfTwoVolumeSelector.ordered(writable, random);
     }
 
+    /**
+     * A failed write invalidates the volume's cached health (Locus InvalidateWritableVolumeSnapshot):
+     * the next candidate selection re-probes on fresh evidence instead of trusting a
+     * possibly stale 30 s entry.
+     */
+    private static void reprobeAfterFailure(StorageVolume volume) {
+        try {
+            volume.probeHealth();
+        } catch (RuntimeException ignored) {
+            // The next candidate selection observes the unhealthy state.
+        }
+    }
+
+    /** Mirrors Locus {@code IsRetryableWriteFailure}: only I/O-class failures advance to the next volume. */
+    private static boolean isRetryableWriteFailure(RuntimeException failure) {
+        return failure instanceof java.io.UncheckedIOException
+                || failure instanceof io.github.cocosip.stow.exception.StorageVolumeUnavailableException;
+    }
+
     private static long available(StorageVolume volume) {
         try {
             return volume.availableCapacity();
@@ -418,31 +441,66 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
     @Override
     public InputStream read(TenantContext tenant, String fileKey) {
         requireEnabled(tenant);
-        FileLocation location = findLocation(tenant.tenantId(), fileKey)
+        SqliteMetadataProjectionStore.FileRow row = metadata.find(tenant.tenantId(), fileKey)
                 .orElseThrow(() -> new StoredFileNotFoundException("Stored file does not exist"));
         StorageVolume volume = volumes.stream()
-                .filter(candidate -> candidate.id().equals(location.volumeId()))
+                .filter(candidate -> candidate.id().equals(row.volumeId()))
                 .findFirst()
-                .orElseThrow(() ->
-                        new PhysicalFileMissingException("Storage volume is unavailable: " + location.volumeId()));
+                .orElseThrow(
+                        () -> new PhysicalFileMissingException("Storage volume is unavailable: " + row.volumeId()));
+        Path physical = Path.of(row.physicalPath());
+        InputStream content;
         try {
-            InputStream content = volume.read(location.physicalPath());
+            content = volume.read(physical);
+        } catch (StoredFileNotFoundException missing) {
+            // Read-path self-heal (Locus TryCorrectMetadataPhysicalPathAsync): after a
+            // volume repair the canonical path may differ from the persisted one.
+            Path corrected = correctedPhysicalPath(row, volume);
+            if (corrected == null) throw missing;
             try {
-                statistics.recordRead(tenant.tenantId(), volume.id());
-            } catch (RuntimeException exception) {
-                // never leak the opened stream because a statistics recorder failed
-                try {
-                    content.close();
-                } catch (java.io.IOException suppressed) {
-                    exception.addSuppressed(suppressed);
-                }
-                throw exception;
+                content = volume.read(corrected);
+            } catch (StoredFileNotFoundException stillMissing) {
+                throw stillMissing;
+            } catch (RuntimeException failure) {
+                throw new PhysicalFileMissingException("Stored file is unavailable: " + fileKey);
             }
-            return content;
-        } catch (StoredFileNotFoundException exception) {
-            throw exception;
+            persistCorrectedPath(tenant.tenantId(), row, corrected);
         } catch (RuntimeException exception) {
             throw new PhysicalFileMissingException("Stored file is unavailable: " + fileKey);
+        }
+        try {
+            statistics.recordRead(tenant.tenantId(), volume.id());
+        } catch (RuntimeException exception) {
+            // never leak the opened stream because a statistics recorder failed
+            try {
+                content.close();
+            } catch (java.io.IOException suppressed) {
+                exception.addSuppressed(suppressed);
+            }
+            throw exception;
+        }
+        return content;
+    }
+
+    /** Returns the volume's canonical path for the row, or null when it matches the persisted path. */
+    private Path correctedPhysicalPath(SqliteMetadataProjectionStore.FileRow row, StorageVolume volume) {
+        Path rebuilt;
+        try {
+            rebuilt = volume.buildPath(row.tenantId(), row.fileKey(), row.fileExtension());
+        } catch (RuntimeException exception) {
+            return null;
+        }
+        boolean unchanged = rebuilt.toAbsolutePath()
+                .normalize()
+                .equals(Path.of(row.physicalPath()).toAbsolutePath().normalize());
+        return unchanged ? null : rebuilt;
+    }
+
+    private void persistCorrectedPath(String tenantId, SqliteMetadataProjectionStore.FileRow row, Path corrected) {
+        try {
+            metadata.correctPhysicalPath(tenantId, row.fileKey(), corrected.toString(), row.rowVersion());
+        } catch (RuntimeException failure) {
+            // The read already succeeded; a lost correction race is retried on the next read.
         }
     }
 
@@ -662,6 +720,19 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
 
     private int reclaimTenant(String tenantId, Duration timeout, int batchSize) {
         if (timeout == null || timeout.isNegative() || timeout.isZero() || batchSize <= 0) return 0;
+        // Single-flight per tenant (Locus scheduledBackgroundTimedOutReclaims): the
+        // inline empty-claim reclaim and the background cycle can overlap, and the
+        // projected status lags the appended events, so concurrent runs would append
+        // duplicate PROCESSING_TIMED_OUT events for one lease.
+        if (!reclaimingTenants.add(tenantId)) return 0;
+        try {
+            return reclaimTenantLocked(tenantId, timeout, batchSize);
+        } finally {
+            reclaimingTenants.remove(tenantId);
+        }
+    }
+
+    private int reclaimTenantLocked(String tenantId, Duration timeout, int batchSize) {
         Instant cutoff = clock.instant().minus(timeout);
         int recovered = 0;
         List<SqliteMetadataProjectionStore.FileRow> rows = metadata.processingBefore(tenantId, cutoff, batchSize);
@@ -868,16 +939,7 @@ public final class DefaultStoragePool implements StoragePool, IdempotentStorageP
     }
 
     private String nextFileKey() {
-        byte[] bytes = new byte[16];
-        random.nextBytes(bytes);
-        char[] result = new char[32];
-        char[] hex = "0123456789abcdef".toCharArray();
-        for (int index = 0; index < bytes.length; index++) {
-            int value = Byte.toUnsignedInt(bytes[index]);
-            result[index * 2] = hex[value >>> 4];
-            result[index * 2 + 1] = hex[value & 15];
-        }
-        return new String(result);
+        return fileKeys.next();
     }
 
     @FunctionalInterface

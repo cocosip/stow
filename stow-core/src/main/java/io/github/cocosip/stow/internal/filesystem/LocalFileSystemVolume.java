@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
 
 final class LocalFileSystemVolume implements StorageVolume {
 
-    private static final long PROBE_CACHE_NANOS = 250_000_000L;
+    private static final long PROBE_CACHE_NANOS = 30L * 1_000_000_000L;
     private static final Pattern TEMPORARY_FILE_NAME = Pattern.compile("^\\.[0-9a-f]{32}(?:\\.[A-Za-z0-9._-]{1,31})?"
             + "\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.tmp$");
 
@@ -74,6 +74,12 @@ final class LocalFileSystemVolume implements StorageVolume {
 
     @Override
     public boolean healthy() {
+        return probe().healthy();
+    }
+
+    @Override
+    public boolean probeHealth() {
+        cachedProbe.set(null);
         return probe().healthy();
     }
 
@@ -470,16 +476,47 @@ final class LocalFileSystemVolume implements StorageVolume {
         if (existing != null && now - existing.checkedAtNanos() < PROBE_CACHE_NANOS) {
             return existing;
         }
-        Probe fresh;
+        Probe fresh = freshProbe(now);
+        cachedProbe.set(fresh);
+        return fresh;
+    }
+
+    private Probe freshProbe(long now) {
         try {
             ensureMountValid();
             var store = Files.getFileStore(mountPath);
-            fresh = new Probe(true, store.getTotalSpace(), store.getUsableSpace(), now);
+            if (store.getUsableSpace() <= 0) {
+                return new Probe(false, store.getTotalSpace(), 0, now);
+            }
+            if (!writeProbeSucceeds()) {
+                return new Probe(false, store.getTotalSpace(), store.getUsableSpace(), now);
+            }
+            return new Probe(true, store.getTotalSpace(), store.getUsableSpace(), now);
         } catch (IOException exception) {
-            fresh = new Probe(false, 0, 0, now);
+            return new Probe(false, 0, 0, now);
         }
-        cachedProbe.set(fresh);
-        return fresh;
+    }
+
+    /**
+     * Single probe write, no retries: a transient failure marks the volume unhealthy
+     * until the next probe cycle. The temp file matches the startup cleanup pattern
+     * so a crashed probe cannot leak a permanent file.
+     */
+    private boolean writeProbeSucceeds() {
+        Path probeFile = mountPath.resolve(temporaryName());
+        try (FileChannel channel = FileChannel.open(
+                probeFile, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+            channel.write(ByteBuffer.wrap("health check".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+            return true;
+        } catch (IOException exception) {
+            return false;
+        } finally {
+            try {
+                Files.deleteIfExists(probeFile);
+            } catch (IOException | RuntimeException ignored) {
+                // Startup cleanup removes the file on the next probe cycle.
+            }
+        }
     }
 
     private static boolean isLink(Path path) throws IOException {

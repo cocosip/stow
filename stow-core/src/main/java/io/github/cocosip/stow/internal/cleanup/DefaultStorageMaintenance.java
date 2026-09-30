@@ -44,6 +44,7 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
     private final JunkFileCleaner junk;
     private final DatabaseHealthService health;
     private final DatabaseRecoveryService recovery;
+    private final OrphanedMetadataCleaner orphanedMetadata;
     private final ProcessingTimeoutRecovery timeoutRecovery;
     private final Path metadataRoot;
     private final Path quotaRoot;
@@ -141,6 +142,7 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
         orphans = new OrphanFileRecovery(journal, metadata, quota, projection, this.volumes, clock, sharedAppender);
         junk = new JunkFileCleaner(this.volumes, List.of(this.metadataRoot, this.quotaRoot), clock);
         health = new DatabaseHealthService(this.metadataRoot, this.quotaRoot, clock);
+        orphanedMetadata = new OrphanedMetadataCleaner(this.metadata, this.quota, this.volumes, clock);
         recovery = new DatabaseRecoveryService(
                 this.metadataRoot, this.quotaRoot, journal, effectiveSqlite, clock, effectiveLimit);
         this.timeoutRecovery = timeoutRecovery;
@@ -247,6 +249,11 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
     @Override
     public CleanupStatistics cleanupJunkFiles() {
         return junk.cleanupJunkFiles(configuration.batchSizePerTenant());
+    }
+
+    @Override
+    public CleanupStatistics cleanupOrphanedMetadata() {
+        return orphanedMetadata.run();
     }
 
     private static String message(Exception exception) {

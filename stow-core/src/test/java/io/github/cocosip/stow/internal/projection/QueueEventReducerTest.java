@@ -166,6 +166,58 @@ class QueueEventReducerTest {
                 .isInstanceOf(ProjectionException.class);
     }
 
+    @Test
+    void skipsStaleDuplicateTimedOutInsteadOfWedgingProjection() {
+        SqliteQuotaRepository quota =
+                new SqliteQuotaRepository(temp, SqliteConnectionFactory.defaults(), CLOCK, ignored -> 10);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(temp, SqliteConnectionFactory.defaults(), CLOCK);
+        QueueEventReducer reducer = new QueueEventReducer(metadata, quota);
+        UUID lease = UUID.randomUUID();
+        quota.reserve(TENANT, KEY, DIR);
+        reducer.apply(event(1, QueueEventType.ACCEPTED, FileProcessingStatus.PENDING, null, null, 0));
+        reducer.apply(event(2, QueueEventType.PROCESSING_STARTED, FileProcessingStatus.PROCESSING, lease, NOW, 0));
+        reducer.apply(event(3, QueueEventType.PROCESSING_TIMED_OUT, FileProcessingStatus.PENDING, lease, NOW, 0));
+
+        // A duplicate recovery event for the same lease converges silently instead of
+        // throwing a conflict that wedges the tenant's projection pipeline.
+        reducer.apply(event(4, QueueEventType.PROCESSING_TIMED_OUT, FileProcessingStatus.PENDING, lease, NOW, 0));
+
+        assertThat(metadata.find(TENANT, KEY))
+                .get()
+                .extracting(SqliteMetadataProjectionStore.FileRow::status)
+                .isEqualTo(FileProcessingStatus.PENDING);
+    }
+
+    @Test
+    void skipsTimedOutEventWhoseLeaseWasAlreadyReplaced() {
+        SqliteQuotaRepository quota =
+                new SqliteQuotaRepository(temp, SqliteConnectionFactory.defaults(), CLOCK, ignored -> 10);
+        SqliteMetadataProjectionStore metadata =
+                new SqliteMetadataProjectionStore(temp, SqliteConnectionFactory.defaults(), CLOCK);
+        QueueEventReducer reducer = new QueueEventReducer(metadata, quota);
+        UUID staleLease = UUID.randomUUID();
+        UUID activeLease = UUID.randomUUID();
+        Instant staleStart = NOW.minusSeconds(120);
+        quota.reserve(TENANT, KEY, DIR);
+        reducer.apply(event(1, QueueEventType.ACCEPTED, FileProcessingStatus.PENDING, null, null, 0));
+        reducer.apply(event(
+                2, QueueEventType.PROCESSING_STARTED, FileProcessingStatus.PROCESSING, staleLease, staleStart, 0));
+        reducer.apply(
+                event(3, QueueEventType.PROCESSING_TIMED_OUT, FileProcessingStatus.PENDING, staleLease, staleStart, 0));
+        reducer.apply(
+                event(4, QueueEventType.PROCESSING_STARTED, FileProcessingStatus.PROCESSING, activeLease, NOW, 0));
+
+        // A late duplicate timed-out for the replaced lease must not clear the newer lease.
+        reducer.apply(
+                event(5, QueueEventType.PROCESSING_TIMED_OUT, FileProcessingStatus.PENDING, staleLease, staleStart, 0));
+
+        assertThat(metadata.find(TENANT, KEY)).get().satisfies(row -> {
+            assertThat(row.status()).isEqualTo(FileProcessingStatus.PROCESSING);
+            assertThat(row.leaseId()).isEqualTo(activeLease.toString());
+        });
+    }
+
     private QueueEventRecord event(
             long sequence, QueueEventType type, FileProcessingStatus status, UUID lease, Instant started, int retries) {
         return new QueueEventRecord(

@@ -133,6 +133,37 @@ public final class SqliteMetadataProjectionStore {
         }
     }
 
+    /**
+     * Runs the operation while holding the tenant's exclusive stripe lock, blocking all
+     * reads and writes for the metadata database (database rebuild coordination).
+     * Reentrant: nested write()/read() calls from the same thread are safe.
+     */
+    public <T> T exclusively(String tenantId, java.util.function.Supplier<T> operation) {
+        ReentrantLock lock = lockFor(tenantId);
+        lock.lock();
+        try {
+            return operation.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Enumerates tenants that own a metadata database on disk (Locus GetProjectedTenantIdsAsync). */
+    public List<String> tenantIds() {
+        java.nio.file.Path root = connections.rootDirectory();
+        try (var directories = java.nio.file.Files.list(root)) {
+            return directories
+                    .filter(java.nio.file.Files::isDirectory)
+                    .map(directory -> directory.getFileName().toString())
+                    .filter(id -> java.nio.file.Files.isRegularFile(
+                            root.resolve(id).resolve("metadata.db"), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                    .sorted()
+                    .toList();
+        } catch (java.io.IOException exception) {
+            throw new DatabaseRecoveryException("Unable to enumerate tenant metadata directories", exception);
+        }
+    }
+
     public Optional<FileRow> find(String tenantId, String fileKey) {
         return read(tenantId, connection -> {
             try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM files WHERE file_key=?")) {
@@ -234,6 +265,43 @@ public final class SqliteMetadataProjectionStore {
                 }
             }
             return List.copyOf(rows);
+        });
+    }
+
+    /**
+     * Removes an orphaned metadata row whose physical file no longer exists (Locus
+     * RemoveProjectedFileAsync). CAS on row version; a lost race returns false.
+     */
+    public boolean removeFile(String tenantId, String fileKey, long expectedRowVersion) {
+        return write(tenantId, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM files WHERE tenant_id=? AND file_key=? AND row_version=?")) {
+                statement.setString(1, tenantId);
+                statement.setString(2, fileKey);
+                statement.setLong(3, expectedRowVersion);
+                return statement.executeUpdate() == 1;
+            }
+        });
+    }
+
+    /**
+     * Repairs the persisted physical path after read-path self-heal (Locus
+     * TryCorrectMetadataPhysicalPathAsync). CAS on row version; a lost race returns false.
+     */
+    public boolean correctPhysicalPath(String tenantId, String fileKey, String correctedPath, long expectedRowVersion) {
+        return write(tenantId, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    """
+                    UPDATE files
+                    SET physical_path=?, row_version=row_version+1
+                    WHERE tenant_id=? AND file_key=? AND row_version=?
+                    """)) {
+                statement.setString(1, correctedPath);
+                statement.setString(2, tenantId);
+                statement.setString(3, fileKey);
+                statement.setLong(4, expectedRowVersion);
+                return statement.executeUpdate() == 1;
+            }
         });
     }
 

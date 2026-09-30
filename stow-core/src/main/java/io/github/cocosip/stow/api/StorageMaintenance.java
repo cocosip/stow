@@ -35,4 +35,13 @@ public interface StorageMaintenance {
     CleanupStatistics cleanupEmptyDirectories();
 
     CleanupStatistics cleanupJunkFiles();
+
+    /**
+     * Removes metadata rows whose physical file no longer exists and releases their
+     * quota charges. Rows on unavailable or unhealthy volumes are skipped, and a row
+     * whose canonical volume path exists is repaired in place instead of removed.
+     */
+    default CleanupStatistics cleanupOrphanedMetadata() {
+        throw new UnsupportedOperationException("cleanupOrphanedMetadata is not supported by this implementation");
+    }
 }

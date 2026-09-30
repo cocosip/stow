@@ -77,6 +77,11 @@ public final class SqliteConnectionFactory {
         return path;
     }
 
+    /** Absolute, normalized root directory holding the per-tenant databases. */
+    public Path rootDirectory() {
+        return rootDirectory;
+    }
+
     public Connection open(String tenantId) throws SQLException {
         validateIdentifier(tenantId);
         Path databasePath = resolveTenantDirectory(tenantId).resolve(databaseFileName);

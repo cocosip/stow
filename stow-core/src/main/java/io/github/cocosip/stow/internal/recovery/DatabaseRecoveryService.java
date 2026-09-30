@@ -40,6 +40,16 @@ public final class DatabaseRecoveryService {
 
     public DatabaseRebuildResult rebuildMetadata(String tenantId) {
         Instant started = clock.instant();
+        // The rebuild moves the live database files, so it runs under the tenant's
+        // exclusive stripes (Locus BeginDatabaseRebuildAsync): in-flight operations
+        // drain first and no operation can start until the rebuild finishes.
+        SqliteMetadataProjectionStore coordinator = new SqliteMetadataProjectionStore(metadataRoot, sqlite, clock);
+        SqliteQuotaRepository quotaCoordinator = new SqliteQuotaRepository(quotaRoot, sqlite, clock, initialLimit);
+        return coordinator.exclusively(
+                tenantId, () -> quotaCoordinator.exclusively(tenantId, () -> rebuildMetadataLocked(tenantId, started)));
+    }
+
+    private DatabaseRebuildResult rebuildMetadataLocked(String tenantId, Instant started) {
         long scanned = 0;
         backup(metadataRoot.resolve(tenantId).resolve("metadata.db"));
         SqliteMetadataProjectionStore metadata = new SqliteMetadataProjectionStore(metadataRoot, sqlite, clock);
@@ -81,6 +91,13 @@ public final class DatabaseRecoveryService {
 
     public DatabaseRebuildResult rebuildQuota(String tenantId) {
         Instant started = clock.instant();
+        SqliteMetadataProjectionStore coordinator = new SqliteMetadataProjectionStore(metadataRoot, sqlite, clock);
+        SqliteQuotaRepository quotaCoordinator = new SqliteQuotaRepository(quotaRoot, sqlite, clock, initialLimit);
+        return coordinator.exclusively(
+                tenantId, () -> quotaCoordinator.exclusively(tenantId, () -> rebuildQuotaLocked(tenantId, started)));
+    }
+
+    private DatabaseRebuildResult rebuildQuotaLocked(String tenantId, Instant started) {
         SqliteMetadataProjectionStore metadata = new SqliteMetadataProjectionStore(metadataRoot, sqlite, clock);
         SqliteQuotaRepository quota = new SqliteQuotaRepository(quotaRoot, sqlite, clock, initialLimit);
         var files = metadata.activeFiles(tenantId);

@@ -141,37 +141,94 @@ public final class FileQueueEventJournal implements QueueEventJournal {
             throw new IllegalArgumentException("offset must be non-negative and maxRecords must be positive");
         }
         TenantLog tenant = tenant(tenantId);
+        JournalReadBatch batch;
         synchronized (tenant) {
             ensureOpen(tenant);
-            if (offset >= tenant.tailOffset) {
-                // Echo semantics: the record invariant keeps nextOffset monotonic for
-                // every replay loop; callers bound their own lag against tailOffset.
-                return new JournalReadBatch(tenantId, offset, offset, tenant.lastSequence, List.of());
-            }
-            long logicalStart = Math.max(offset, tenant.baseOffset);
-            long physicalStart = logicalStart - tenant.baseOffset;
-            long physicalTail = tenant.tailOffset - tenant.baseOffset;
-            try {
-                JournalScanner.ReadResult result = new JournalScanner()
-                        .readBatch(
-                                tenant.directory.resolve("queue.log"),
-                                tenant.codec,
-                                physicalStart,
-                                physicalTail,
-                                maxRecords);
-                if (result.events().isEmpty()) {
-                    return new JournalReadBatch(
-                            tenantId, offset, Math.max(offset, tenant.tailOffset), tenant.lastSequence, List.of());
+            batch = readBatchLocked(tenant, offset, maxRecords);
+        }
+        // A prefix ending at a corrupt frame is still returned: the events before the
+        // corruption are valid facts and applied_events makes replaying them safe.
+        if (!batch.corruptTail() || !batch.events().isEmpty()) {
+            return batch;
+        }
+        // An empty prefix at a corrupt frame: stop the writer outside the monitor
+        // (close() joins the worker, whose result callback re-enters the monitor),
+        // repair the tail per persistence §7, then re-read once. Mid-file corruption
+        // throws from the scan and latches the tenant DOWN.
+        TenantJournalWriter writer;
+        synchronized (tenant) {
+            writer = tenant.writer;
+            tenant.writer = null;
+        }
+        if (writer != null) {
+            writer.flush();
+            writer.close();
+        }
+        synchronized (tenant) {
+            ensureOpen(tenant);
+            repairTailLocked(tenant);
+            return readBatchLocked(tenant, offset, maxRecords);
+        }
+    }
+
+    private JournalReadBatch readBatchLocked(TenantLog tenant, long offset, int maxRecords) {
+        if (offset >= tenant.tailOffset) {
+            // Echo semantics: the record invariant keeps nextOffset monotonic for
+            // every replay loop; callers bound their own lag against tailOffset.
+            return new JournalReadBatch(tenant.tenantId, offset, offset, tenant.lastSequence, List.of());
+        }
+        long logicalStart = Math.max(offset, tenant.baseOffset);
+        long physicalStart = logicalStart - tenant.baseOffset;
+        long physicalTail = tenant.tailOffset - tenant.baseOffset;
+        JournalScanner scanner = new JournalScanner();
+        Path log = tenant.directory.resolve("queue.log");
+        JournalScanner.ReadResult result;
+        try {
+            result = scanner.readBatch(log, tenant.codec, physicalStart, physicalTail, maxRecords);
+            if (result.corruptTail() && result.events().isEmpty()) {
+                // Misaligned cursor recovery (Locus NormalizeReadOffset): snap the
+                // offset back to the nearest verified frame boundary and retry.
+                long normalized = scanner.normalizeReadOffset(log, tenant.codec, physicalStart);
+                if (normalized < physicalStart) {
+                    result = scanner.readBatch(log, tenant.codec, normalized, physicalTail, maxRecords);
+                    physicalStart = normalized;
                 }
-                return new JournalReadBatch(
-                        tenantId,
-                        offset,
-                        tenant.baseOffset + result.nextOffset(),
-                        result.lastSequenceNumber(),
-                        result.events());
-            } catch (IOException exception) {
-                throw new DatabaseRecoveryException("Unable to read journal for tenant " + tenantId, exception);
             }
+        } catch (IOException exception) {
+            throw new DatabaseRecoveryException("Unable to read journal for tenant " + tenant.tenantId, exception);
+        }
+        if (result.events().isEmpty()) {
+            if (result.corruptTail()) {
+                return new JournalReadBatch(
+                        tenant.tenantId,
+                        offset,
+                        Math.max(offset, tenant.baseOffset + physicalStart),
+                        tenant.lastSequence,
+                        List.of(),
+                        true);
+            }
+            return new JournalReadBatch(
+                    tenant.tenantId, offset, Math.max(offset, tenant.tailOffset), tenant.lastSequence, List.of());
+        }
+        return new JournalReadBatch(
+                tenant.tenantId,
+                offset,
+                tenant.baseOffset + result.nextOffset(),
+                result.lastSequenceNumber(),
+                result.events(),
+                result.corruptTail());
+    }
+
+    private void repairTailLocked(TenantLog tenant) {
+        try {
+            JournalScanner.Result scan =
+                    new JournalScanner().scan(tenant.directory.resolve("queue.log"), tenant.codec, true);
+            tenant.tailOffset = tenant.baseOffset + scan.physicalLength();
+            tenant.lastSequence = scan.lastSequenceNumber();
+            tenant.admittedSequence = Math.min(tenant.admittedSequence, scan.lastSequenceNumber());
+            persistState(tenant, scan.repaired(), scan.corruptOffset());
+        } catch (IOException exception) {
+            throw new DatabaseRecoveryException("Unable to repair journal for tenant " + tenant.tenantId, exception);
         }
     }
 

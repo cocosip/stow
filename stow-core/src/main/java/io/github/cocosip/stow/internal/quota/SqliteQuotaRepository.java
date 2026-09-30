@@ -227,6 +227,14 @@ public final class SqliteQuotaRepository {
     }
 
     /**
+     * Runs the operation while holding the tenant's exclusive quota stripe lock, blocking
+     * all reads and writes for the quota database (database rebuild coordination).
+     */
+    public <T> T exclusively(String tenantId, java.util.function.Supplier<T> operation) {
+        return database.exclusively(tenantId, operation);
+    }
+
+    /**
      * Recomputes counts from the projected active set. Explicit directory limits are
      * preserved (rebuilding changes counts, never policy), and in-flight reservations
      * keep their charges so a concurrent consume or rollback stays consistent.

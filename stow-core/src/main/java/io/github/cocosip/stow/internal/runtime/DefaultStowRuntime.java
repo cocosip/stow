@@ -331,6 +331,7 @@ public final class DefaultStowRuntime implements StowRuntime {
                 .toList();
         if (!storageVolumes.isEmpty()) {
             ownedResources.push(() -> closeVolumes(storageVolumes));
+            gateVolumeMounts();
         }
 
         JournalCodec codec = journalCodec == null ? defaultJournalCodec() : journalCodec;
@@ -617,6 +618,7 @@ public final class DefaultStowRuntime implements StowRuntime {
         // writes; startup owns their removal).
         silentMaintenance(storageMaintenanceService::cleanupInvalidDatabaseBackups);
         silentMaintenance(storageMaintenanceService::cleanupEmptyDirectories);
+        silentMaintenance(storageMaintenanceService::cleanupOrphanedMetadata);
         // VACUUM takes the database write lock, so it runs daily like the original's
         // scheduled maintenance instead of on every cycle.
         Instant now = clock.instant();
@@ -674,6 +676,30 @@ public final class DefaultStowRuntime implements StowRuntime {
             }
         }
         if (failure != null) throw failure;
+    }
+
+    /**
+     * Mount-time gate (Locus AddVolumeAsync): a volume joins the runtime only after two
+     * consecutive forced health probes pass, so a missing or read-only mount fails
+     * startup instead of silently receiving no writes.
+     */
+    private void gateVolumeMounts() {
+        for (StorageVolume volume : storageVolumes) {
+            int consecutive = 0;
+            RuntimeException lastFailure = null;
+            for (int attempt = 0; attempt < 3 && consecutive < 2; attempt++) {
+                try {
+                    consecutive = volume.probeHealth() ? consecutive + 1 : 0;
+                } catch (RuntimeException exception) {
+                    consecutive = 0;
+                    lastFailure = exception;
+                }
+            }
+            if (consecutive < 2) {
+                throw new io.github.cocosip.stow.exception.StorageVolumeUnavailableException(
+                        "Storage volume " + volume.id() + " is not healthy at mount time", lastFailure);
+            }
+        }
     }
 
     private RuntimeException closeOwnedResources() {

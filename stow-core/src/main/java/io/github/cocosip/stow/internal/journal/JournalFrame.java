@@ -49,10 +49,14 @@ public final class JournalFrame {
 
     public static JournalFrame decode(byte[] bytes) {
         if (bytes == null || bytes.length < MIN_FRAME_LENGTH) {
-            throw new JournalCorruptionException("Incomplete journal frame");
+            throw new JournalCorruptionException(
+                    io.github.cocosip.stow.exception.JournalCorruptionException.Reason.STRUCTURE,
+                    "Incomplete journal frame");
         }
         if (!Arrays.equals(MAGIC, Arrays.copyOf(bytes, MAGIC.length))) {
-            throw new JournalCorruptionException("Invalid journal frame magic");
+            throw new JournalCorruptionException(
+                    io.github.cocosip.stow.exception.JournalCorruptionException.Reason.STRUCTURE,
+                    "Invalid journal frame magic");
         }
         ByteBuffer header = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         header.position(4);
@@ -65,7 +69,9 @@ public final class JournalFrame {
                 || payloadLength > MAX_PAYLOAD_LENGTH
                 || frameLength != MIN_FRAME_LENGTH + payloadLength
                 || sequenceNumber < 1) {
-            throw new JournalCorruptionException("Invalid journal frame lengths or sequence");
+            throw new JournalCorruptionException(
+                    io.github.cocosip.stow.exception.JournalCorruptionException.Reason.STRUCTURE,
+                    "Invalid journal frame lengths or sequence");
         }
         int expected = ByteBuffer.wrap(bytes, bytes.length - TRAILER_SIZE, TRAILER_SIZE)
                 .order(ByteOrder.BIG_ENDIAN)
@@ -73,7 +79,9 @@ public final class JournalFrame {
         CRC32 crc = new CRC32();
         crc.update(bytes, 8, bytes.length - TRAILER_SIZE - 8);
         if ((int) crc.getValue() != expected) {
-            throw new JournalCorruptionException("Journal frame CRC mismatch");
+            throw new JournalCorruptionException(
+                    io.github.cocosip.stow.exception.JournalCorruptionException.Reason.CRC,
+                    "Journal frame CRC mismatch");
         }
         return new JournalFrame(
                 frameLength,

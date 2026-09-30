@@ -229,6 +229,39 @@ class FileQueueEventJournalTest {
         assertThat(output).doesNotContain("OutOfMemoryError");
     }
 
+    @Test
+    void returnsValidPrefixForCorruptTailThenRepairsOnEmptyRead() throws Exception {
+        Path root = Files.createTempDirectory("stow-journal-corrupt-tail");
+        try (FileQueueEventJournal journal =
+                new FileQueueEventJournal(root, configuration(JournalAckMode.DURABLE), new BinaryV1JournalCodec())) {
+            journal.append(event("tenant-a", 1));
+            journal.append(event("tenant-a", 2));
+            journal.append(event("tenant-a", 3));
+            Path log = root.resolve("tenant-a").resolve("queue.log");
+            byte[] bytes = Files.readAllBytes(log);
+            bytes[bytes.length - 1] ^= 0xff; // break the final frame's CRC
+            Files.write(log, bytes);
+
+            JournalReadBatch prefix = journal.readBatch("tenant-a", 0, 10);
+            assertThat(prefix.corruptTail()).isTrue();
+            assertThat(prefix.events())
+                    .extracting(QueueEventRecord::sequenceNumber)
+                    .containsExactly(1L, 2L);
+
+            // The empty read at the corrupt frame triggers the repair: the tail is
+            // truncated and the journal accepts new appends afterwards.
+            JournalReadBatch after = journal.readBatch("tenant-a", prefix.nextOffset(), 10);
+            assertThat(after.corruptTail()).isFalse();
+            assertThat(after.events()).isEmpty();
+            assertThat(journal.tailOffset("tenant-a")).isEqualTo(prefix.nextOffset());
+
+            journal.append(event("tenant-a", 3));
+            assertThat(journal.readBatch("tenant-a", prefix.nextOffset(), 10).events())
+                    .extracting(QueueEventRecord::sequenceNumber)
+                    .containsExactly(3L);
+        }
+    }
+
     private static JournalConfiguration configuration(JournalAckMode mode) {
         return configuration(mode, 8);
     }

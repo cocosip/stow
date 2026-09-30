@@ -50,6 +50,84 @@ public final class JournalScanner {
         }
     }
 
+    /**
+     * Snaps a read offset back to the nearest structurally valid frame boundary at or
+     * before it (Locus {@code NormalizeReadOffset}). An offset inside a valid frame
+     * resolves to that frame's start; corrupt bytes resolve to the last verified frame.
+     */
+    public long normalizeReadOffset(Path log, JournalCodec codec, long offset) throws IOException {
+        if (offset <= 0) {
+            return 0;
+        }
+        try (FileChannel channel = FileChannel.open(log, StandardOpenOption.READ)) {
+            long length = Math.min(channel.size(), offset);
+            return codec.format() == JournalFormat.BINARY_V1
+                    ? normalizeBinary(channel, offset, length)
+                    : normalizeJson(channel, codec, offset, length);
+        }
+    }
+
+    private long normalizeBinary(FileChannel channel, long offset, long length) throws IOException {
+        long frameStart = 0;
+        while (frameStart < length) {
+            if (length - frameStart < JournalFrame.MIN_FRAME_LENGTH) {
+                return frameStart;
+            }
+            int frameLength;
+            try {
+                frameLength = binaryFrameLength(channel, frameStart);
+                if (frameLength < JournalFrame.MIN_FRAME_LENGTH
+                        || frameLength > MAX_BINARY_FRAME_LENGTH
+                        || frameStart + frameLength > length) {
+                    return frameStart;
+                }
+                JournalFrame.decode(readBytes(channel, frameStart, frameLength));
+            } catch (JournalCorruptionException exception) {
+                return frameStart;
+            }
+            long frameEnd = frameStart + frameLength;
+            if (frameEnd >= offset) {
+                return frameEnd == offset ? offset : frameStart;
+            }
+            frameStart = frameEnd;
+        }
+        return frameStart;
+    }
+
+    private long normalizeJson(FileChannel channel, JournalCodec codec, long offset, long length) throws IOException {
+        long recordStart = 0;
+        long cursor = 0;
+        ByteArrayOutputStream line = new ByteArrayOutputStream();
+        ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+        while (cursor < length) {
+            buffer.clear();
+            buffer.limit((int) Math.min(buffer.capacity(), length - cursor));
+            int read = channel.read(buffer, cursor);
+            if (read <= 0) throw new IOException("Journal channel made no progress");
+            buffer.flip();
+            while (buffer.hasRemaining()) {
+                byte value = buffer.get();
+                cursor++;
+                line.write(value);
+                if (line.size() > MAX_JSON_RECORD_LENGTH) {
+                    return recordStart;
+                }
+                if (value != '\n') continue;
+                try {
+                    codec.decode(line.toByteArray());
+                } catch (JournalCorruptionException exception) {
+                    return recordStart;
+                }
+                if (cursor >= offset) {
+                    return cursor == offset ? offset : recordStart;
+                }
+                recordStart = cursor;
+                line.reset();
+            }
+        }
+        return recordStart;
+    }
+
     private Result scanBinary(FileChannel channel, JournalCodec codec, boolean allowCompactedSuffix)
             throws IOException {
         long length = channel.size();
@@ -78,7 +156,9 @@ public final class JournalScanner {
                 break;
             }
             if (frameLength > MAX_BINARY_FRAME_LENGTH) {
-                throw corruption("Invalid binary journal frame length at offset " + offset);
+                throw corruption(
+                        JournalCorruptionException.Reason.STRUCTURE,
+                        "Invalid binary journal frame length at offset " + offset);
             }
             if (frameLength > remaining) {
                 corruptOffset = offset;
@@ -93,7 +173,9 @@ public final class JournalScanner {
                 QueueEventRecord event = codec.decode(frame);
                 if (expectedSequence < 0) expectedSequence = event.sequenceNumber();
                 if (event.sequenceNumber() != expectedSequence || decoded.sequenceNumber() != expectedSequence) {
-                    throw corruption("Journal sequence gap or regression at offset " + offset);
+                    throw corruption(
+                            JournalCorruptionException.Reason.SEQUENCE,
+                            "Journal sequence gap or regression at offset " + offset);
                 }
                 if (recordCount == 0) firstSequence = event.sequenceNumber();
                 lastSequence = event.sequenceNumber();
@@ -101,7 +183,9 @@ public final class JournalScanner {
                 expectedSequence++;
                 offset += frameLength;
             } catch (JournalCorruptionException exception) {
-                if (offset + frameLength == length && message(exception).contains("CRC")) {
+                if (offset + frameLength == length
+                        && (exception.reason() == JournalCorruptionException.Reason.CRC
+                                || exception.reason() == JournalCorruptionException.Reason.STRUCTURE)) {
                     corruptOffset = offset;
                     channel.truncate(offset);
                     length = offset;
@@ -137,7 +221,9 @@ public final class JournalScanner {
                 offset++;
                 line.write(value);
                 if (line.size() > MAX_JSON_RECORD_LENGTH) {
-                    throw corruption("JSON journal record exceeds 1 MiB at offset " + recordStart);
+                    throw corruption(
+                            JournalCorruptionException.Reason.STRUCTURE,
+                            "JSON journal record exceeds 1 MiB at offset " + recordStart);
                 }
                 if (value != '\n') continue;
                 byte[] encoded = line.toByteArray();
@@ -145,7 +231,9 @@ public final class JournalScanner {
                     QueueEventRecord event = codec.decode(encoded);
                     if (expectedSequence < 0) expectedSequence = event.sequenceNumber();
                     if (event.sequenceNumber() != expectedSequence) {
-                        throw corruption("Journal sequence gap or regression at offset " + recordStart);
+                        throw corruption(
+                                JournalCorruptionException.Reason.SEQUENCE,
+                                "Journal sequence gap or regression at offset " + recordStart);
                     }
                     if (recordCount == 0) firstSequence = event.sequenceNumber();
                     lastSequence = event.sequenceNumber();
@@ -154,7 +242,7 @@ public final class JournalScanner {
                     recordStart = offset;
                     line.reset();
                 } catch (JournalCorruptionException exception) {
-                    if (offset == length && repairableFinalJson(exception)) {
+                    if (offset == length && repairableFinalRecord(exception)) {
                         corruptOffset = recordStart;
                         channel.truncate(recordStart);
                         length = recordStart;
@@ -181,25 +269,38 @@ public final class JournalScanner {
         long cursor = offset;
         while (cursor < end && events.size() < maxRecords) {
             if (end - cursor < JournalFrame.MIN_FRAME_LENGTH) {
-                throw corruption("Incomplete binary journal frame at offset " + cursor);
+                return new ReadResult(events, cursor, lastSequenceOf(events), true);
             }
-            int frameLength = binaryFrameLength(channel, cursor);
+            int frameLength;
+            try {
+                frameLength = binaryFrameLength(channel, cursor);
+            } catch (JournalCorruptionException exception) {
+                return new ReadResult(events, cursor, lastSequenceOf(events), true);
+            }
             if (frameLength < JournalFrame.MIN_FRAME_LENGTH
                     || frameLength > MAX_BINARY_FRAME_LENGTH
                     || cursor + frameLength > end) {
-                throw corruption("Invalid binary journal frame length at offset " + cursor);
+                return new ReadResult(events, cursor, lastSequenceOf(events), true);
             }
-            events.add(codec.decode(readBytes(channel, cursor, frameLength)));
+            try {
+                events.add(codec.decode(readBytes(channel, cursor, frameLength)));
+            } catch (JournalCorruptionException exception) {
+                if (exception.reason() == JournalCorruptionException.Reason.SEQUENCE
+                        || exception.reason() == JournalCorruptionException.Reason.SCHEMA) {
+                    throw exception;
+                }
+                return new ReadResult(events, cursor, lastSequenceOf(events), true);
+            }
             cursor += frameLength;
         }
-        long lastSequence = events.isEmpty() ? 0 : events.get(events.size() - 1).sequenceNumber();
-        return new ReadResult(events, cursor, lastSequence);
+        return new ReadResult(events, cursor, lastSequenceOf(events), false);
     }
 
     private ReadResult readJsonBatch(FileChannel channel, JournalCodec codec, long offset, long end, int maxRecords)
             throws IOException {
         List<QueueEventRecord> events = new ArrayList<>(Math.min(maxRecords, 256));
         long cursor = offset;
+        long recordStart = offset;
         ByteArrayOutputStream line = new ByteArrayOutputStream();
         ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
         while (cursor < end && events.size() < maxRecords) {
@@ -213,25 +314,48 @@ public final class JournalScanner {
                 cursor++;
                 line.write(value);
                 if (line.size() > MAX_JSON_RECORD_LENGTH) {
-                    throw corruption("JSON journal record exceeds 1 MiB at offset " + (cursor - line.size()));
+                    return new ReadResult(events, recordStart, lastSequenceOf(events), true);
                 }
-                if (value == '\n') {
+                if (value != '\n') continue;
+                try {
                     events.add(codec.decode(line.toByteArray()));
-                    line.reset();
+                } catch (JournalCorruptionException exception) {
+                    if (exception.reason() == JournalCorruptionException.Reason.SEQUENCE
+                            || exception.reason() == JournalCorruptionException.Reason.SCHEMA) {
+                        throw exception;
+                    }
+                    return new ReadResult(events, recordStart, lastSequenceOf(events), true);
                 }
+                recordStart = cursor;
+                line.reset();
             }
         }
         if (cursor == end && line.size() > 0) {
-            throw corruption("Incomplete JSON journal record at offset " + (cursor - line.size()));
+            return new ReadResult(events, recordStart, lastSequenceOf(events), true);
         }
-        long lastSequence = events.isEmpty() ? 0 : events.get(events.size() - 1).sequenceNumber();
-        return new ReadResult(events, cursor, lastSequence);
+        return new ReadResult(events, cursor, lastSequenceOf(events), false);
+    }
+
+    private static long lastSequenceOf(List<QueueEventRecord> events) {
+        return events.isEmpty() ? 0 : events.get(events.size() - 1).sequenceNumber();
+    }
+
+    /**
+     * A final record is repairable when its bytes are structurally broken or fail the
+     * checksum; unknown schemas and sequence breaks are never repaired.
+     */
+    private static boolean repairableFinalRecord(JournalCorruptionException exception) {
+        JournalCorruptionException.Reason reason = exception.reason();
+        return reason != JournalCorruptionException.Reason.SCHEMA
+                && reason != JournalCorruptionException.Reason.SEQUENCE;
     }
 
     private static int binaryFrameLength(FileChannel channel, long offset) throws IOException {
         byte[] header = readBytes(channel, offset, 8);
         if (header[0] != 'S' || header[1] != 'T' || header[2] != 'W' || header[3] != '1') {
-            throw corruption("Middle binary journal corruption at offset " + offset);
+            throw corruption(
+                    JournalCorruptionException.Reason.STRUCTURE,
+                    "Middle binary journal corruption at offset " + offset);
         }
         return ByteBuffer.wrap(header, 4, 4).order(ByteOrder.BIG_ENDIAN).getInt();
     }
@@ -248,20 +372,8 @@ public final class JournalScanner {
         return buffer.array();
     }
 
-    private static boolean repairableFinalJson(JournalCorruptionException exception) {
-        String message = message(exception);
-        return !message.contains("Unsupported")
-                && !message.contains("Unknown")
-                && !message.contains("sequence")
-                && !message.contains("Sequence");
-    }
-
-    private static String message(Exception exception) {
-        return exception.getMessage() == null ? "" : exception.getMessage();
-    }
-
-    private static JournalCorruptionException corruption(String message) {
-        return new JournalCorruptionException(message);
+    private static JournalCorruptionException corruption(JournalCorruptionException.Reason reason, String message) {
+        return new JournalCorruptionException(reason, message);
     }
 
     public record Result(
@@ -272,9 +384,14 @@ public final class JournalScanner {
             long lastSequenceNumber,
             long recordCount) {}
 
-    public record ReadResult(List<QueueEventRecord> events, long nextOffset, long lastSequenceNumber) {
+    public record ReadResult(
+            List<QueueEventRecord> events, long nextOffset, long lastSequenceNumber, boolean corruptTail) {
         public ReadResult {
             events = List.copyOf(events);
+        }
+
+        public ReadResult(List<QueueEventRecord> events, long nextOffset, long lastSequenceNumber) {
+            this(events, nextOffset, lastSequenceNumber, false);
         }
     }
 }

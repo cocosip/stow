@@ -41,6 +41,21 @@ final class QuotaDatabaseExecutor {
         return execute(tenantId, true, operation);
     }
 
+    /**
+     * Runs the operation while holding the tenant's exclusive stripe lock, blocking all
+     * reads and writes for the quota database (database rebuild coordination). Reentrant:
+     * nested execute() calls from the same thread are safe.
+     */
+    <T> T exclusively(String tenantId, java.util.function.Supplier<T> operation) {
+        ReentrantLock lock = lockFor(connections.databasePath(tenantId));
+        acquireInterruptibly(lock);
+        try {
+            return operation.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     long nowMillis() {
         return clock.instant().toEpochMilli();
     }

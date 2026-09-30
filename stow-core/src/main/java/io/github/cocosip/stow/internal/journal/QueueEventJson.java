@@ -115,11 +115,14 @@ final class QueueEventJson {
         }
         int schemaVersion = requiredInt(node, "schemaVersion");
         if (schemaVersion != 1) {
-            throw new JournalCorruptionException("Unsupported queue event schema version: " + schemaVersion);
+            throw new JournalCorruptionException(
+                    JournalCorruptionException.Reason.SCHEMA,
+                    "Unsupported queue event schema version: " + schemaVersion);
         }
         node.fieldNames().forEachRemaining(name -> {
             if (!FIELD_NAMES.contains(name) && !name.equals("payloadCrc32")) {
-                throw new JournalCorruptionException("Unknown queue event field: " + name);
+                throw new JournalCorruptionException(
+                        JournalCorruptionException.Reason.SCHEMA, "Unknown queue event field: " + name);
             }
         });
         try {

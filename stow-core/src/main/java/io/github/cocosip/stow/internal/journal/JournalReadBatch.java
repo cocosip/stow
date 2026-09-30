@@ -4,13 +4,27 @@ import io.github.cocosip.stow.model.QueueEventRecord;
 import java.util.List;
 
 public record JournalReadBatch(
-        String tenantId, long startOffset, long nextOffset, long lastSequenceNumber, List<QueueEventRecord> events) {
+        String tenantId,
+        long startOffset,
+        long nextOffset,
+        long lastSequenceNumber,
+        List<QueueEventRecord> events,
+        boolean corruptTail) {
 
     public JournalReadBatch {
         if (startOffset < 0 || nextOffset < startOffset || lastSequenceNumber < 0) {
             throw new IllegalArgumentException("invalid journal batch offsets");
         }
         events = List.copyOf(events);
+    }
+
+    public JournalReadBatch(
+            String tenantId,
+            long startOffset,
+            long nextOffset,
+            long lastSequenceNumber,
+            List<QueueEventRecord> events) {
+        this(tenantId, startOffset, nextOffset, lastSequenceNumber, events, false);
     }
 
     public boolean hasMore() {
