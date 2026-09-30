@@ -39,6 +39,9 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
 
     private final WatcherConfigurationStore store;
     private final WatcherScanner scanner;
+    // Retained for registration validation (register C17); null in the
+    // store/scanner test constructor, which skips the tenant check.
+    private final TenantManager tenants;
     private final DefaultOptionsManager options;
     private final Consumer<WatcherScanResult> scanObserver;
     private final Clock clock;
@@ -88,6 +91,7 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
             SourceCleanupConfiguration cleanupConfiguration,
             SourceCleanupStore cleanupStore) {
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.tenants = Objects.requireNonNull(tenants, "tenants");
         store = new WatcherConfigurationStore(watcherDirectory);
         options = new DefaultOptionsManager(store);
         ImportedFileHistory history = new ImportedFileHistory(watcherDirectory.resolve("history"), clock);
@@ -112,6 +116,7 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
     DefaultFileWatcherManager(WatcherConfigurationStore store, WatcherScanner scanner, Clock clock) {
         this.store = Objects.requireNonNull(store, "store");
         this.scanner = Objects.requireNonNull(scanner, "scanner");
+        this.tenants = null;
         this.clock = Objects.requireNonNull(clock, "clock");
         options = new DefaultOptionsManager(store);
         scanObserver = ignored -> {};
@@ -123,10 +128,30 @@ public final class DefaultFileWatcherManager implements FileWatcherManager, Auto
         if (store.find(configuration.watcherId()).isPresent()) {
             throw new IllegalArgumentException("Watcher already exists: " + configuration.watcherId());
         }
+        validateRegistration(configuration);
         WatcherConfiguration saved = store.save(configuration);
         nextDueByWatcherId.remove(configuration.watcherId());
         rescheduleNow();
         return saved;
+    }
+
+    /**
+     * Registration validation (register C17): a single-tenant watcher needs an
+     * existing tenant, and two watchers must not watch the same directory.
+     */
+    private void validateRegistration(WatcherConfiguration configuration) {
+        if (tenants != null
+                && configuration.tenantMode() == io.github.cocosip.stow.model.WatcherTenantMode.SINGLE_TENANT
+                && tenants.find(configuration.tenantId()).isEmpty()) {
+            throw new IllegalArgumentException("Watcher tenant does not exist: " + configuration.tenantId());
+        }
+        Path watchPath = configuration.watchPath().toAbsolutePath().normalize();
+        for (WatcherConfiguration existing : store.list()) {
+            if (existing.watchPath().toAbsolutePath().normalize().equals(watchPath)) {
+                throw new IllegalArgumentException(
+                        "Another watcher already watches this path: " + existing.watcherId());
+            }
+        }
     }
 
     @Override

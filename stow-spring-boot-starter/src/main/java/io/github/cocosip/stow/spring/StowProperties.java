@@ -947,7 +947,9 @@ public class StowProperties {
         private Path mountPath;
         private int shardingDepth;
         private int bufferSize = 65_536;
-        private boolean forceFlushAfterWrite;
+        // Locus-aligned default: file content is forced before the atomic move, so a
+        // crash cannot strand the journal's ACCEPTED fact with a short data file.
+        private boolean forceFlushAfterWrite = true;
 
         VolumeConfiguration toConfiguration() {
             return new VolumeConfiguration(id, mountPath, shardingDepth, bufferSize, forceFlushAfterWrite);

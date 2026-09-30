@@ -39,6 +39,9 @@ public final class OrphanFileRecovery {
     private final Map<String, StorageVolume> volumes;
     private final Clock clock;
     private final MaintenanceEventAppender appender;
+    // Tenant gate (register C14): recovery adopts orphans only for existing, enabled
+    // tenants; null keeps the pre-gate behavior for direct constructions in tests.
+    private final java.util.function.Function<String, io.github.cocosip.stow.model.TenantStatus> tenantStatus;
 
     public OrphanFileRecovery(
             QueueEventJournal journal,
@@ -47,7 +50,7 @@ public final class OrphanFileRecovery {
             QueueProjectionService projection,
             List<StorageVolume> volumes,
             Clock clock) {
-        this(journal, metadata, quota, projection, volumes, clock, new SequencedJournalAppender(journal));
+        this(journal, metadata, quota, projection, volumes, clock, new SequencedJournalAppender(journal), null);
     }
 
     public OrphanFileRecovery(
@@ -58,6 +61,18 @@ public final class OrphanFileRecovery {
             List<StorageVolume> volumes,
             Clock clock,
             SequencedJournalAppender appender) {
+        this(journal, metadata, quota, projection, volumes, clock, appender, null);
+    }
+
+    public OrphanFileRecovery(
+            QueueEventJournal journal,
+            SqliteMetadataProjectionStore metadata,
+            SqliteQuotaRepository quota,
+            QueueProjectionService projection,
+            List<StorageVolume> volumes,
+            Clock clock,
+            SequencedJournalAppender appender,
+            java.util.function.Function<String, io.github.cocosip.stow.model.TenantStatus> tenantStatus) {
         this.journal = Objects.requireNonNull(journal, "journal");
         this.metadata = Objects.requireNonNull(metadata, "metadata");
         this.quota = Objects.requireNonNull(quota, "quota");
@@ -66,16 +81,29 @@ public final class OrphanFileRecovery {
                 .collect(Collectors.toUnmodifiableMap(StorageVolume::id, Function.identity()));
         this.clock = Objects.requireNonNull(clock, "clock");
         this.appender = new MaintenanceEventAppender(appender);
+        this.tenantStatus = tenantStatus;
     }
 
     public CleanupStatistics recover(String tenantId, int maxFiles) {
         if (tenantId == null || tenantId.isBlank()) throw new IllegalArgumentException("tenantId must not be blank");
         if (maxFiles <= 0) throw new IllegalArgumentException("maxFiles must be positive");
         CleanupStatisticsBuilder statistics = new CleanupStatisticsBuilder(clock);
+        if (!tenantRecoverable(tenantId)) {
+            // Unknown or disabled tenants are not recovery sources (register C14):
+            // adopting their files would violate tenant isolation.
+            statistics.skipped();
+            return statistics.build();
+        }
         for (StorageVolume volume : volumes.values()) {
             recoverFromVolume(volume, tenantId, maxFiles, statistics);
         }
         return statistics.build();
+    }
+
+    private boolean tenantRecoverable(String tenantId) {
+        if (tenantStatus == null) return true;
+        io.github.cocosip.stow.model.TenantStatus status = tenantStatus.apply(tenantId);
+        return status == io.github.cocosip.stow.model.TenantStatus.ENABLED;
     }
 
     public CleanupStatistics recoverAll(int maxFilesPerTenant) {

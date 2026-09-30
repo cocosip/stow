@@ -45,6 +45,7 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
     private final DatabaseHealthService health;
     private final DatabaseRecoveryService recovery;
     private final OrphanedMetadataCleaner orphanedMetadata;
+    private final RetiredVolumeCleaner retiredVolumes;
     private final ProcessingTimeoutRecovery timeoutRecovery;
     private final Path metadataRoot;
     private final Path quotaRoot;
@@ -120,6 +121,38 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
             ToLongFunction<String> initialTenantLimit,
             ProcessingTimeoutRecovery timeoutRecovery,
             SequencedJournalAppender appender) {
+        this(
+                journal,
+                metadata,
+                quota,
+                projection,
+                volumes,
+                metadataRoot,
+                quotaRoot,
+                sqlite,
+                clock,
+                configuration,
+                initialTenantLimit,
+                timeoutRecovery,
+                appender,
+                null);
+    }
+
+    public DefaultStorageMaintenance(
+            QueueEventJournal journal,
+            SqliteMetadataProjectionStore metadata,
+            SqliteQuotaRepository quota,
+            QueueProjectionService projection,
+            List<StorageVolume> volumes,
+            Path metadataRoot,
+            Path quotaRoot,
+            SqliteConfiguration sqlite,
+            Clock clock,
+            CleanupConfiguration configuration,
+            ToLongFunction<String> initialTenantLimit,
+            ProcessingTimeoutRecovery timeoutRecovery,
+            SequencedJournalAppender appender,
+            java.util.function.Function<String, io.github.cocosip.stow.model.TenantStatus> tenantStatus) {
         this.journal = Objects.requireNonNull(journal, "journal");
         this.metadata = Objects.requireNonNull(metadata, "metadata");
         this.quota = Objects.requireNonNull(quota, "quota");
@@ -139,10 +172,12 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
         completed = new CompletedFileReaper(journal, metadata, projection, this.volumes, clock, sharedAppender);
         permanentFailure =
                 new PermanentFailureReaper(journal, metadata, projection, this.volumes, clock, sharedAppender);
-        orphans = new OrphanFileRecovery(journal, metadata, quota, projection, this.volumes, clock, sharedAppender);
+        orphans = new OrphanFileRecovery(
+                journal, metadata, quota, projection, this.volumes, clock, sharedAppender, tenantStatus);
         junk = new JunkFileCleaner(this.volumes, List.of(this.metadataRoot, this.quotaRoot), clock);
         health = new DatabaseHealthService(this.metadataRoot, this.quotaRoot, clock);
         orphanedMetadata = new OrphanedMetadataCleaner(this.metadata, this.quota, this.volumes, clock);
+        retiredVolumes = new RetiredVolumeCleaner(this.metadata, this.quota, clock);
         recovery = new DatabaseRecoveryService(
                 this.metadataRoot, this.quotaRoot, journal, effectiveSqlite, clock, effectiveLimit);
         this.timeoutRecovery = timeoutRecovery;
@@ -269,6 +304,11 @@ public final class DefaultStorageMaintenance implements StorageMaintenance {
     @Override
     public CleanupStatistics cleanupOrphanedMetadata() {
         return orphanedMetadata.run();
+    }
+
+    @Override
+    public CleanupStatistics cleanupRetiredVolumes(java.util.Set<String> retiredVolumeIds, boolean purgeMetadataOnly) {
+        return retiredVolumes.clean(retiredVolumeIds, purgeMetadataOnly, configuration.batchSizePerTenant());
     }
 
     private static String message(Exception exception) {

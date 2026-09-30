@@ -92,16 +92,23 @@ public final class PermanentFailureReaper {
                         statistics.skipped();
                         continue;
                     }
-                    if (!volumeHealthy(row.volumeId())) {
+                    // Purge-metadata-only converges the row without touching the file,
+                    // so it does not require a healthy volume (Locus PurgeMetadataOnly).
+                    if (disposition != PermanentlyFailedDisposition.PURGE_METADATA_ONLY
+                            && !volumeHealthy(row.volumeId())) {
                         // A temporary mount outage must not converge the row while
                         // its file may simply be unreachable (register C12).
                         statistics.skipped();
                         continue;
                     }
                     try {
-                        Path finalLocation = disposition == PermanentlyFailedDisposition.MOVE_TO_DEAD_LETTER
-                                ? moveToDeadLetter(row, volume(row))
-                                : delete(row, volume(row));
+                        Path finalLocation =
+                                switch (disposition) {
+                                    case MOVE_TO_DEAD_LETTER -> moveToDeadLetter(row, volume(row));
+                                    case PURGE_METADATA_ONLY -> Path.of(row.physicalPath());
+                                    case DELETE -> delete(row, volume(row));
+                                    case KEEP -> throw new IllegalStateException("unreachable");
+                                };
                         appender.append(event(row, finalLocation));
                         project(tenantId);
                         statistics.succeeded(tenantId, row.fileSize());

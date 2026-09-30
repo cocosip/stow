@@ -460,7 +460,11 @@ public final class DefaultStowRuntime implements StowRuntime {
                     configuration.cleanup(),
                     tenantId -> ((DefaultTenantManager) tenantManager).quotaLimit(tenantId),
                     timeoutRecovery,
-                    appender);
+                    appender,
+                    tenantId -> ((DefaultTenantManager) tenantManager)
+                            .find(tenantId)
+                            .map(io.github.cocosip.stow.model.TenantContext::status)
+                            .orElse(null));
             sourceCleanupStore = new SourceCleanupStore(configuration.sourceCleanup(), configuration.sqlite(), clock);
             watcherManagerService = new DefaultFileWatcherManager(
                     configuration.paths().watcherDirectory(),

@@ -44,4 +44,14 @@ public interface StorageMaintenance {
     default CleanupStatistics cleanupOrphanedMetadata() {
         throw new UnsupportedOperationException("cleanupOrphanedMetadata is not supported by this implementation");
     }
+
+    /**
+     * Applies the policy for intentionally retired volumes (Locus RetiredVolumeDisposition):
+     * {@code purgeMetadataOnly} removes the projected rows that point at the retired
+     * volumes and releases their quota without touching physical storage; a false value
+     * keeps the rows and does nothing.
+     */
+    default CleanupStatistics cleanupRetiredVolumes(java.util.Set<String> retiredVolumeIds, boolean purgeMetadataOnly) {
+        throw new UnsupportedOperationException("cleanupRetiredVolumes is not supported by this implementation");
+    }
 }

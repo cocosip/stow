@@ -3,6 +3,7 @@ package io.github.cocosip.stow.internal.watcher;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -12,6 +13,8 @@ import static org.mockito.Mockito.when;
 import io.github.cocosip.stow.api.StoragePool;
 import io.github.cocosip.stow.api.TenantManager;
 import io.github.cocosip.stow.model.PostImportAction;
+import io.github.cocosip.stow.model.TenantContext;
+import io.github.cocosip.stow.model.TenantStatus;
 import io.github.cocosip.stow.model.WatcherConfiguration;
 import io.github.cocosip.stow.model.WatcherOptions;
 import io.github.cocosip.stow.model.WatcherScanResult;
@@ -39,6 +42,9 @@ class FileWatcherManagerTest {
     void persistsConfigurationAndSupportsLifecycleOperations() throws Exception {
         Path root = Files.createTempDirectory(Path.of("target"), "watcher-manager-");
         TenantManager tenants = mock(TenantManager.class);
+        when(tenants.find(anyString()))
+                .thenAnswer(ignored -> java.util.Optional.of(
+                        new TenantContext("tenant-a", TenantStatus.ENABLED, Instant.EPOCH, Instant.EPOCH)));
         StoragePool pool = mock(StoragePool.class);
         DefaultFileWatcherManager manager = new DefaultFileWatcherManager(root, pool, tenants, CLOCK);
         WatcherConfiguration configuration = configuration(root.resolve("in"), "watcher-a", "tenant-a");
@@ -92,6 +98,9 @@ class FileWatcherManagerTest {
     void mapsSingleAndSubdirectoryTenantsAndPersistsOptions() throws Exception {
         Path root = Files.createTempDirectory(Path.of("target"), "watcher-options-");
         TenantManager tenants = mock(TenantManager.class);
+        when(tenants.find(anyString()))
+                .thenAnswer(ignored -> java.util.Optional.of(
+                        new TenantContext("tenant-a", TenantStatus.ENABLED, Instant.EPOCH, Instant.EPOCH)));
         StoragePool pool = mock(StoragePool.class);
         DefaultFileWatcherManager manager = new DefaultFileWatcherManager(root, pool, tenants, CLOCK);
 
