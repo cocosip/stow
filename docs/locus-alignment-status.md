@@ -33,8 +33,9 @@ or remaining work. It complements the design baseline in `stow-design.md`
 | INTENTIONAL | 20 | stow's contract deliberately chooses stricter or different behavior; do not change without a contract revision (§5) |
 | OPEN | 0 | Nothing queued: every finding is resolved or an intentional deviation |
 
-All 10 P0 and all 45 P1 findings are resolved (2 former P1s are
-INTENTIONAL). The register is closed.
+All 10 P0 and all 45 P1 findings are resolved (9 former P1s are
+INTENTIONAL: J4, J5, S5, Q6, Q7, C10, W7, W10, W11). The register is
+closed.
 
 Status legend used below: **FIXED**, **PARTIAL**, **INTENTIONAL** (§5),
 **OPEN** (§6). Priority is the original audit priority (P0 blocker, P1
