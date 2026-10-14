@@ -45,10 +45,13 @@ class SourceFileRelocatorTest {
             // as a completed deletion against a "missing" file (Locus 1.5.6).
             assertThatThrownBy(() -> new SourceFileRelocator().deleteIfMatching(source, expected))
                     .isInstanceOf(AccessDeniedException.class);
-            assertThat(source).exists();
         } finally {
             Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
         }
+        // Presence is asserted after the permissions are restored: exists() swallows
+        // the same I/O failure this test exercises and would report a false absence.
+        assertThat(source).exists();
+        assertThat(Files.readString(source)).isEqualTo("content");
     }
 
     @Test
