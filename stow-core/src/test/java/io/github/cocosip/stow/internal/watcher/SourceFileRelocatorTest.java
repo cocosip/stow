@@ -1,10 +1,14 @@
 package io.github.cocosip.stow.internal.watcher;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.nio.file.AccessDeniedException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import org.junit.jupiter.api.Test;
 
 class SourceFileRelocatorTest {
@@ -21,6 +25,30 @@ class SourceFileRelocatorTest {
 
         assertThat(status).isEqualTo(SourceFileRelocator.Status.FINGERPRINT_MISMATCH);
         assertThat(Files.readString(source)).isEqualTo("two");
+    }
+
+    @Test
+    void propagatesTransientSourceFailuresInsteadOfReportingMissing() throws Exception {
+        Path root = Files.createTempDirectory(Path.of("target"), "source-sealed-");
+        Path directory = root.resolve("sealed");
+        Path source = directory.resolve("source.bin");
+        Files.createDirectories(directory);
+        Files.writeString(source, "content");
+        SourceFingerprint expected = SourceFingerprint.capture(source);
+        assumeTrue(
+                Files.getFileStore(root).supportsFileAttributeView("posix"),
+                "POSIX permissions are required to seal the parent directory");
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("-w-------"));
+
+        try {
+            // A locked or unreadable source must surface as a failure to retry, never
+            // as a completed deletion against a "missing" file (Locus 1.5.6).
+            assertThatThrownBy(() -> new SourceFileRelocator().deleteIfMatching(source, expected))
+                    .isInstanceOf(AccessDeniedException.class);
+            assertThat(source).exists();
+        } finally {
+            Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+        }
     }
 
     @Test

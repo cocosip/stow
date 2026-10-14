@@ -3,6 +3,7 @@ package io.github.cocosip.stow.internal.watcher;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -176,7 +177,7 @@ class SourceCleanupWorkerTest {
     }
 
     @Test
-    void recordsTerminalFailureWhenQuarantineAlsoFails() throws Exception {
+    void keepsQuarantinePendingWhenQuarantineAlsoFails() throws Exception {
         SourceCleanupStore store = mock(SourceCleanupStore.class);
         SourceFileRelocator relocator = mock(SourceFileRelocator.class);
         SourceCleanupJob job = job(SourceCleanupAction.DELETE, 0, 1, Path.of("failed"));
@@ -187,11 +188,57 @@ class SourceCleanupWorkerTest {
 
         SourceCleanupWorker.CycleResult result = enabledWorker(store, relocator).runCycle();
 
+        // Locus 1.5.6: a transiently unverifiable source keeps MovePending with backoff
+        // instead of stranding as terminal. Only the retained job is persisted.
+        ArgumentCaptor<SourceCleanupJob> updated = ArgumentCaptor.forClass(SourceCleanupJob.class);
+        verify(store).update(updated.capture());
+        SourceCleanupJob retained = updated.getValue();
+        assertThat(retained.state()).isEqualTo(SourceCleanupState.MOVE_PENDING);
+        assertThat(retained.attemptCount()).isEqualTo(2);
+        assertThat(retained.nextAttemptAt()).isEqualTo(NOW.plusSeconds(4));
+        assertThat(retained.lastError()).isEqualTo("still locked");
+        assertThat(result.terminalFailed()).isZero();
+        assertThat(result.retried()).isEqualTo(1);
+        verify(store, never()).remove(anyLong());
+    }
+
+    @Test
+    void recordsTerminalFailureWithoutFailureDirectoryAfterFinalCleanupFailure() throws Exception {
+        SourceCleanupStore store = mock(SourceCleanupStore.class);
+        SourceFileRelocator relocator = mock(SourceFileRelocator.class);
+        SourceCleanupJob job = job(SourceCleanupAction.DELETE, 0, 1, null);
+        when(store.claimDue(any(), anyInt(), any())).thenReturn(List.of(job)).thenReturn(List.of());
+        doThrow(new IOException("locked")).when(relocator).deleteIfMatching(job.sourcePath(), job.fingerprint());
+
+        SourceCleanupWorker.CycleResult result = enabledWorker(store, relocator).runCycle();
+
         ArgumentCaptor<SourceCleanupJob> updated = ArgumentCaptor.forClass(SourceCleanupJob.class);
         verify(store).update(updated.capture());
         assertThat(updated.getValue().state()).isEqualTo(SourceCleanupState.TERMINAL_FAILED);
         assertThat(updated.getValue().nextAttemptAt()).isNull();
         assertThat(result.terminalFailed()).isEqualTo(1);
+    }
+
+    @Test
+    void quarantinesRetriedPendingSourceOnceClaimedAgain() throws Exception {
+        SourceCleanupStore store = mock(SourceCleanupStore.class);
+        SourceFileRelocator relocator = mock(SourceFileRelocator.class);
+        SourceCleanupJob job = job(SourceCleanupAction.DELETE, 1, 1, Path.of("failed"));
+        SourceCleanupJob claimed =
+                job.transition(job.fileKey(), 1, SourceCleanupState.MOVE_PENDING, null, "earlier failure", NOW, null);
+        Path quarantine = claimed.failureDirectory()
+                .resolve(claimed.watcherId())
+                .resolve(claimed.sourcePath().getFileName());
+        when(store.claimDue(any(), anyInt(), any()))
+                .thenReturn(List.of(claimed))
+                .thenReturn(List.of());
+        when(relocator.moveIfMatching(claimed.sourcePath(), quarantine, claimed.fingerprint()))
+                .thenReturn(new SourceFileRelocator.Result(SourceFileRelocator.Status.COMPLETED, quarantine));
+
+        SourceCleanupWorker.CycleResult result = enabledWorker(store, relocator).runCycle();
+
+        assertThat(result.quarantined()).isEqualTo(1);
+        verify(store).remove(claimed.id());
     }
 
     @Test

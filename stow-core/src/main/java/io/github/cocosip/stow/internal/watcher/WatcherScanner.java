@@ -275,10 +275,11 @@ public final class WatcherScanner {
     }
 
     /**
-     * Legacy-path post-import failure handling (register C16): exponential backoff
-     * capped at the configured maximum, a retry budget, and quarantine into the
-     * failure directory once the budget is exhausted. A failed quarantine move still
-     * marks the source terminal, like Locus.
+     * Legacy-path post-import failure handling (register C16, re-aligned with Locus
+     * 1.5.6): exponential backoff capped at the configured maximum, a retry budget,
+     * and quarantine into the failure directory once the budget is exhausted. A
+     * transiently failing quarantine keeps backing off instead of marking the source
+     * terminal; only a completed or provably moot quarantine ends the retries.
      */
     private Outcome recordActionFailure(
             WatcherConfiguration configuration,
@@ -287,38 +288,49 @@ public final class WatcherScanner {
             ImportedFileHistory.HistoryEntry entry,
             RuntimeException actionFailure) {
         int attempts = entry.attempts() + 1;
-        if (attempts >= configuration.maxPostImportActionAttempts()) {
-            quarantine(configuration, source, fingerprint);
+        long backoffMillis = backoffMillis(configuration, attempts);
+        if (attempts >= configuration.maxPostImportActionAttempts() && quarantine(configuration, source, fingerprint)) {
             history.recordQuarantined(configuration.watcherId(), entry);
             return Outcome.quarantinedOutcome();
-        }
-        long backoffMillis = configuration
-                .postImportRetryInitialDelay()
-                .multipliedBy(1L << Math.min(attempts - 1, 16))
-                .toMillis();
-        if (backoffMillis < 0
-                || backoffMillis > configuration.postImportRetryMaxDelay().toMillis()) {
-            backoffMillis = configuration.postImportRetryMaxDelay().toMillis();
         }
         history.recordActionRetry(
                 configuration.watcherId(), entry, attempts, clock.instant().plusMillis(backoffMillis));
         return Outcome.failedOutcome(tenantForError(configuration), "post-action", actionFailure);
     }
 
-    private void quarantine(WatcherConfiguration configuration, Path source, SourceFingerprint fingerprint) {
+    private long backoffMillis(WatcherConfiguration configuration, int attempts) {
+        long backoffMillis = configuration
+                .postImportRetryInitialDelay()
+                .multipliedBy(1L << Math.min(attempts - 1, 16))
+                .toMillis();
+        if (backoffMillis < 0
+                || backoffMillis > configuration.postImportRetryMaxDelay().toMillis()) {
+            return configuration.postImportRetryMaxDelay().toMillis();
+        }
+        return backoffMillis;
+    }
+
+    /**
+     * Moves the source into the failure directory once the retry budget is exhausted.
+     * Returns false only when the move could not be completed right now (a transient
+     * source or failure-directory failure, Locus 1.5.6): the caller keeps the entry in
+     * its retry state instead of stranding it with a terminal flag. A fingerprint
+     * mismatch (the source changed after the failed action) or a missing failure
+     * directory still returns true — the mismatch leaves the file in place and the
+     * terminal flag alone stops retries.
+     */
+    private boolean quarantine(WatcherConfiguration configuration, Path source, SourceFingerprint fingerprint) {
         Path failureDirectory = configuration.sourceCleanupFailureDirectory();
-        if (failureDirectory == null || source.getFileName() == null) return;
+        if (failureDirectory == null || source.getFileName() == null) return true;
         Path target = failureDirectory.resolve(configuration.watcherId()).resolve(source.getFileName());
         try {
             Path targetParent = target.getParent();
-            if (targetParent == null) return;
+            if (targetParent == null) return true;
             Files.createDirectories(targetParent);
-            // Fingerprint-guarded move: if the source changed after the failed action,
-            // the mismatch leaves it in place and the terminal flag alone stops retries.
             relocator.moveIfMatching(source, target, fingerprint);
+            return true;
         } catch (IOException | RuntimeException ignored) {
-            // A failed quarantine becomes terminal via the history flag; the next
-            // scan will not retry the action either way.
+            return false;
         }
     }
 

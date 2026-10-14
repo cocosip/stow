@@ -259,8 +259,25 @@ public final class SourceCleanupWorker implements AutoCloseable {
                 counters.completed.incrementAndGet();
             }
         } catch (IOException | RuntimeException failure) {
-            terminalFailure(job, Math.max(1, job.attemptCount()), error(failure), counters);
+            // Locus 1.5.6: a transiently unverifiable or unmovable source keeps its
+            // MovePending state with backoff instead of stranding as terminal; only a
+            // verified move ends the quarantine phase.
+            retainMovePending(job, failure, counters);
         }
+    }
+
+    private void retainMovePending(SourceCleanupJob job, Exception failure, Counters counters) {
+        int attempts = job.attemptCount() + 1;
+        Instant now = clock.instant();
+        store.update(job.transition(
+                job.fileKey(),
+                attempts,
+                SourceCleanupState.MOVE_PENDING,
+                now.plus(retryDelay(job, attempts)),
+                error(failure),
+                now,
+                job.moveTargetPath()));
+        counters.retried.incrementAndGet();
     }
 
     private void terminalFailure(SourceCleanupJob job, int attempts, String error, Counters counters) {

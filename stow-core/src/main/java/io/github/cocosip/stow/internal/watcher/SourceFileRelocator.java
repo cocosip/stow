@@ -6,9 +6,11 @@ import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -131,8 +133,24 @@ final class SourceFileRelocator {
 
     private static Status sourceState(Path source, SourceFingerprint expected) throws IOException {
         Objects.requireNonNull(expected, "expected");
-        if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) return Status.SOURCE_MISSING;
+        if (!isPresent(source)) return Status.SOURCE_MISSING;
         return SourceFingerprint.capture(source).equals(expected) ? Status.COMPLETED : Status.FINGERPRINT_MISMATCH;
+    }
+
+    /**
+     * True only when the source is confirmed absent or present. Unlike
+     * {@link Files#exists}, an I/O failure other than a missing entry (a lock, an
+     * access denial, a mount hiccup) propagates instead of counting as absence, so
+     * temporarily unverifiable sources are retried rather than dropped as missing
+     * (Locus 1.5.6 classification).
+     */
+    private static boolean isPresent(Path source) throws IOException {
+        try {
+            Files.readAttributes(source, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            return true;
+        } catch (NoSuchFileException exception) {
+            return false;
+        }
     }
 
     private static byte[] fullHash(Path path) throws IOException {

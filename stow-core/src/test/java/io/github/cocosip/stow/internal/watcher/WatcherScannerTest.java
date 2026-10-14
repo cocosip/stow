@@ -425,6 +425,81 @@ class WatcherScannerTest {
                 .isEqualTo(1);
     }
 
+    @Test
+    void keepsRetryingWhenQuarantineTransientlyFailsThenQuarantines() throws Exception {
+        Path root = Files.createTempDirectory(Path.of("target"), "watcher-legacy-quarantine-");
+        Path input = root.resolve("input");
+        Files.createDirectories(input);
+        Path source = input.resolve("a.dcm");
+        Files.writeString(source, "data");
+        // A regular file where a move directory is expected makes every MOVE fail.
+        Path moveBlocker = root.resolve("move-blocker");
+        Files.writeString(moveBlocker, "not a directory");
+        // The failure directory starts blocked too, so the quarantine cannot complete.
+        Path failureRoot = root.resolve("failed-root");
+        Files.writeString(failureRoot, "not a directory either");
+        StoragePool pool = mock(StoragePool.class);
+        when(pool.write(any(TenantContext.class), any(ContentSource.class), any()))
+                .thenReturn("0123456789abcdef0123456789abcdef");
+        TenantManager tenants = mock(TenantManager.class);
+        when(tenants.find("tenant-a")).thenReturn(Optional.of(context("tenant-a")));
+        ImportedFileHistory history = new ImportedFileHistory(root.resolve("history"), CLOCK);
+        MutableClock clock = new MutableClock(Instant.parse("2099-01-01T00:00:00Z"));
+        WatcherScanner clockedScanner = new WatcherScanner(pool, tenants, history, clock);
+        WatcherConfiguration configuration = new WatcherConfiguration(
+                "watcher-a",
+                "tenant-a",
+                WatcherTenantMode.SINGLE_TENANT,
+                false,
+                input,
+                true,
+                false,
+                List.of("**/*.dcm"),
+                PostImportAction.MOVE,
+                moveBlocker,
+                Duration.ZERO,
+                0,
+                Duration.ZERO,
+                Duration.ZERO,
+                1,
+                2,
+                Duration.ofDays(1),
+                Duration.ZERO,
+                failureRoot,
+                2,
+                Duration.ofSeconds(5),
+                Duration.ofMinutes(5));
+
+        WatcherScanResult first = clockedScanner.scan(configuration);
+        assertThat(first.importedCount()).isEqualTo(1);
+        assertThat(source).exists();
+
+        // Arm the backoff, then exhaust the retry budget of 2.
+        clock.advance(Duration.ofMinutes(6));
+        assertThat(clockedScanner.scan(configuration).failedCount()).isEqualTo(1);
+        clock.advance(Duration.ofMinutes(6));
+        // The budget is exhausted but the quarantine move fails transiently (blocked
+        // failure directory): Locus 1.5.6 keeps the entry retryable, not terminal.
+        assertThat(clockedScanner.scan(configuration).failedCount()).isEqualTo(1);
+        assertThat(source).exists();
+        assertThat(quarantinedCount(history)).isZero();
+
+        // Once the failure directory accepts the move, the next scan quarantines.
+        Files.delete(failureRoot);
+        Files.createDirectories(failureRoot);
+        clock.advance(Duration.ofMinutes(6));
+        assertThat(clockedScanner.scan(configuration).filesQuarantined()).isEqualTo(1);
+        assertThat(failureRoot.resolve("watcher-a").resolve("a.dcm")).exists();
+        assertThat(source).doesNotExist();
+        assertThat(quarantinedCount(history)).isEqualTo(1);
+    }
+
+    private long quarantinedCount(ImportedFileHistory history) {
+        return history.read("watcher-a").stream()
+                .filter(ImportedFileHistory.HistoryEntry::isQuarantined)
+                .count();
+    }
+
     private static final class MutableClock extends Clock {
 
         private volatile Instant instant;
