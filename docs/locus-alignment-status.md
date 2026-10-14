@@ -138,7 +138,7 @@ semantic/capability, P2 minor).
 | C13 | P2 | Dead-letter layout/options not configurable; no `PurgeMetadataOnly` disposition | FIXED — `PURGE_METADATA_ONLY` disposition converges permanent-failure rows to DEAD_LETTERED and releases quota without touching the physical file (Locus PurgeMetadataOnly); it also does not require a healthy volume |
 | C14 | P2 | Orphan recovery fidelity: name pattern gating, `/` logical directory, no tenant-status gating | FIXED — orphan recovery only adopts files for existing, enabled tenants (tenant-status gate threaded from the runtime); name-pattern gating and the `/` logical directory were already in place |
 | C15 | P2 | Import pre-checks missing (0-byte skip, exclusive-open skip, unstable = skipped) | FIXED — imports skip 0-byte sources and treat an unstable file between stability probes as a skip for the next scan rather than a failure |
-| C16 | P2 | Legacy watcher path lacks post-import retry caps, backoff, quarantine | FIXED — the legacy import path now has the same protections as the durable one: failed post-import actions back off exponentially up to the configured maximum, stop after `maxPostImportActionAttempts`, and quarantine the source into `<failureDirectory>/<watcherId>/`; a failed quarantine move still marks the source terminal |
+| C16 | P2 | Legacy watcher path lacks post-import retry caps, backoff, quarantine | FIXED — the legacy import path now has the same protections as the durable one: failed post-import actions back off exponentially up to the configured maximum, stop after `maxPostImportActionAttempts`, and quarantine the source into `<failureDirectory>/<watcherId>/`; a failed quarantine move still marks the source terminal (revisited — see §8 R1: Locus 1.5.6 retains pending state and stow follows) |
 | C17 | P2 | Watcher registration validation gaps (overlap, tenant existence) | FIXED — watcher registration validates that a single-tenant watcher's tenant exists and that no existing watcher already watches the same directory |
 | C18 | P2 | Options defaults (`maxParallelScans` 1 vs 4), no interval clamp, `historyFlushDebounce` dead knob | FIXED — `maxParallelScans` defaults to 4, the scan interval clamps to the Locus bounds [5 s, 1 h], and the global `historyFlushDebounce` knob is live as the history-prune throttle |
 | C19 | P2 | Retired-volume handling dead code; no `PurgeMetadataOnly` disposition | FIXED — retired volumes use the Locus disposition model (`KEEP` / purge-metadata-only): the rewired cleaner removes projected rows pointing at retired volumes and releases quota without touching physical storage, exposed via `StorageMaintenance.cleanupRetiredVolumes` |
@@ -182,8 +182,6 @@ rationale for each is stated in its register row and in
 
 Open P1 items, ordered by expected production impact:
 
-## 6. Remaining Work (backlog)
-
 None. Every one of the 95 findings is either FIXED or an INTENTIONAL
 deviation enumerated in §5. Future behavior changes to the intentional
 deviations require a contract revision.
@@ -216,3 +214,44 @@ deviations require a contract revision.
   damaged-database startup recovery, and snapshot state round-trips.
 - Platform notes: five skipped tests require symbolic-link support and abort
   via JUnit assumptions on Windows environments without it.
+
+## 8. Locus 1.5.6 Re-Alignment Addendum (2026-10)
+
+Locus advanced past the review baseline after the register closed (net9
+`v2.0.2` → `v1.5.6`, merged to master as `v2.0.3`): it retries failed
+metadata initialization, serializes maintenance, prevents hot-metadata
+regression across connection reopen, orders pending persistence operations,
+recovers orphan metadata atomically, and retains source-cleanup jobs when
+fingerprint verification is temporarily unavailable. A follow-up walkthrough
+compared each of those fixes against stow's implementation.
+
+Structurally not applicable to stow, so not ported: the Lazy
+exception-caching poisoning (stow opens a fresh SQLite connection per
+operation and caches nothing), the maintenance/initialization race (all
+reads, writes, VACUUM, and rebuilds serialize on the per-tenant stripe
+locks, and rebuilds drain in-flight operations under `exclusively`), and the
+hot-state regression, cross-batch reordering, and batch-staged-value defects
+(stow has no in-memory hot-state mirror; the reducer reads the current row
+inside the same transaction and replays idempotently from the journal
+cursor). Stow already retained background-persistence retries after
+transient failures: the journal and cursor keep unprojected events, and
+`markApplied` deduplicates on replay.
+
+| # | P | Finding | Status |
+|---|---|---------|--------|
+| R1 | P1 | Quarantine failures turned terminal on the first error, stranding the source file untracked in the watch directory (C16's "failed quarantine marks terminal" matched Locus 2.0.2; Locus 1.5.6 retains pending state) | FIXED — the durable worker keeps `MOVE_PENDING` with backoff on a transient quarantine failure, and the legacy history entry keeps backing off instead of latching quarantined; only a completed move, a proven replacement or missing source, or a missing failure directory ends the retries |
+| R2 | P2 | `SourceFileRelocator` classified a transiently unreadable source as missing (`Files.exists` returns false on I/O errors) and silently dropped the cleanup job | FIXED — only a confirmed absence (`NoSuchFileException`) reports `SOURCE_MISSING`; other I/O failures propagate into the retry path |
+| R3 | P2 | Startup health check classified any non-busy/locked exception as DOWN, sending temporarily unopenable databases (e.g. CANTOPEN) into destructive rebuild | FIXED — DOWN now requires corruption evidence (a failed `quick_check` verdict or SQLITE_IOERR/CORRUPT/NOTADB, the Locus rebuild triggers); other failures retry briefly and report DEGRADED |
+| R4 | P3 | `OrphanFileRecovery` adoption check races a concurrent append for the same file key; a lost race would wedge the strict reducer | OBSERVATION — the window is narrow and same-process; Locus narrows it further with an atomic conditional create; revisit only with a contract revision of the strict-reducer rule (P16) |
+
+Verification: `mvn clean verify` green. New regression tests cover the
+retained quarantine pending state
+(`SourceCleanupWorkerTest.keepsQuarantinePendingWhenQuarantineAlsoFails`),
+the retried pending job converging once claimed again
+(`SourceCleanupWorkerTest.quarantinesRetriedPendingSourceOnceClaimedAgain`),
+the retrying legacy quarantine
+(`WatcherScannerTest.keepsRetryingWhenQuarantineTransientlyFailsThenQuarantines`),
+the missing-versus-unreadable source classification
+(`SourceFileRelocatorTest.propagatesTransientSourceFailuresInsteadOfReportingMissing`,
+POSIX-gated), and the degraded-not-down transient database classification
+(`DatabaseHealthServiceTest`).

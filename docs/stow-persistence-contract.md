@@ -426,8 +426,11 @@ next-attempt, lease, and update time.
 later scan can reserve again and reuse the deterministic storage operation ID.
 DELETE and MOVE always recapture the fingerprint; mismatch removes only the
 obsolete job and leaves the replacement source untouched. Successful actions
-and missing sources remove the row. Exhausted failures move matching content to
-`<failureDirectory>/<watcherId>/`; a failed quarantine becomes terminal.
+and missing sources remove the row. Exhausted failures move matching content
+to `<failureDirectory>/<watcherId>/`. A transiently failing quarantine keeps
+the job pending with backoff (Locus 1.5.6); only a completed move, a proven
+replacement or missing source, or a missing failure directory ends the
+retries.
 
 The database, reservation recovery, terminal pruning, claims, and `VACUUM` are
 all gated by source-cleanup enabled, global watcher enabled, and at least one
